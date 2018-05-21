@@ -661,6 +661,10 @@ def add_model_parameters(params):
 def add_training_args(params):
     train_params = params.add_argument_group("Training parameters")
 
+    train_params.add_argument('--language-model',
+                              action='store_true',
+                              help='Train a language model instead of a NMT system. Default: %(default)s.')
+
     train_params.add_argument('--batch-size', '-b',
                               type=int_greater_or_equal(1),
                               default=64,
@@ -962,6 +966,10 @@ def add_translate_cli_args(params):
 
 def add_inference_args(params):
     decode_params = params.add_argument_group("Inference parameters")
+
+    decode_params.add_argument('--language-model',
+                               action='store_true',
+                               help='Query a language model instead translation. Default: %(default)s.')
 
     decode_params.add_argument(C.INFERENCE_ARG_INPUT_LONG, C.INFERENCE_ARG_INPUT_SHORT,
                                default=None,

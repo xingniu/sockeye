@@ -123,7 +123,8 @@ def test_model_parameters(test_params, expected_params):
 
 
 @pytest.mark.parametrize("test_params, expected_params", [
-    ('', dict(batch_size=64,
+    ('', dict(language_model=False,
+              batch_size=64,
               batch_type="sentence",
               fill_up='replicate',
               loss=C.CROSS_ENTROPY,
@@ -187,7 +188,8 @@ def test_training_arg(test_params, expected_params):
 
 
 @pytest.mark.parametrize("test_params, expected_params", [
-    ('-m model', dict(input=None,
+    ('-m model', dict(language_model=False,
+                      input=None,
                       input_factors=None,
                       json_input=False,
                       output=None,

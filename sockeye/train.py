@@ -543,6 +543,48 @@ def create_decoder_config(args: argparse.Namespace, encoder_num_hidden: int) -> 
     return config_decoder
 
 
+def create_language_model_config(args: argparse.Namespace) -> Tuple[encoder.EncoderConfig, decoder.DecoderConfig]:
+    """
+    Create the config for the language model.
+
+    :param args: Arguments as returned by argparse.
+    :return: The config for the decoder.
+    """
+    _, decoder_num_layers = args.num_layers
+    max_seq_len_source, max_seq_len_target = args.max_seq_len
+    _, num_embed_target = args.num_embed
+    config_encoder = None  # type: Optional[Config]
+    config_decoder = None  # type: Optional[Config]
+
+    if args.decoder == C.TRANSFORMER_TYPE:
+        raise NotImplementedError()
+    elif args.decoder == C.CONVOLUTION_TYPE:
+        raise NotImplementedError()
+    else:
+        config_encoder = encoder.EmptyEncoderConfig(
+            num_hidden=args.rnn_num_hidden)
+
+        _, decoder_rnn_dropout_inputs = args.rnn_dropout_inputs
+        _, decoder_rnn_dropout_states = args.rnn_dropout_states
+        _, decoder_rnn_dropout_recurrent = args.rnn_dropout_recurrent
+
+        config_decoder = decoder.RecurrentLanguageModelConfig(
+            max_seq_len_source=max_seq_len_source,
+            rnn_config=rnn.RNNConfig(cell_type=args.rnn_cell_type,
+                                     num_hidden=args.rnn_num_hidden,
+                                     num_layers=decoder_num_layers,
+                                     dropout_inputs=decoder_rnn_dropout_inputs,
+                                     dropout_states=decoder_rnn_dropout_states,
+                                     dropout_recurrent=decoder_rnn_dropout_recurrent,
+                                     residual=args.rnn_residual_connections,
+                                     first_residual_layer=args.rnn_first_residual_layer,
+                                     forget_bias=args.rnn_forget_bias,
+                                     lhuc=args.lhuc is not None and (C.LHUC_DECODER in args.lhuc or C.LHUC_ALL in args.lhuc)),
+            layer_normalization=args.layer_normalization)
+
+    return config_encoder, config_decoder
+
+
 def check_encoder_decoder_args(args) -> None:
     """
     Check possible encoder-decoder argument conflicts.
@@ -592,8 +634,11 @@ def create_model_config(args: argparse.Namespace,
                                                            num_highway_layers=args.conv_embed_num_highway_layers,
                                                            dropout=args.conv_embed_dropout)
 
-    config_encoder, encoder_num_hidden = create_encoder_config(args, config_conv)
-    config_decoder = create_decoder_config(args, encoder_num_hidden)
+    if args.language_model:
+        config_encoder, config_decoder = create_language_model_config(args)
+    else:
+        config_encoder, encoder_num_hidden = create_encoder_config(args, config_conv)
+        config_decoder = create_decoder_config(args, encoder_num_hidden)
 
     source_factor_configs = None
     if len(source_vocab_sizes) > 1:

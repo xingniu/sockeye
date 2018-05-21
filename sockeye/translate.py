@@ -40,6 +40,10 @@ def main():
     arguments.add_translate_cli_args(params)
     args = params.parse_args()
 
+    if args.language_model:
+        args.beam_size = 1
+        args.output_type = C.OUTPUT_HANDLER_TRANSLATION_WITH_SCORE
+
     if args.output is not None:
         global logger
         logger = setup_main_logger(__name__,
@@ -97,7 +101,8 @@ def main():
                                           target_vocab=target_vocab,
                                           restrict_lexicon=restrict_lexicon,
                                           store_beam=store_beam,
-                                          strip_unknown_words=args.strip_unknown_words)
+                                          strip_unknown_words=args.strip_unknown_words,
+                                          language_model=args.language_model)
         read_and_translate(translator=translator,
                            output_handler=output_handler,
                            chunk_size=args.chunk_size,

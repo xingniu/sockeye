@@ -31,7 +31,8 @@ from . import utils
 from .config import Config
 
 logger = logging.getLogger(__name__)
-DecoderConfig = Union['RecurrentDecoderConfig', transformer.TransformerConfig, 'ConvolutionalDecoderConfig']
+DecoderConfig = Union['RecurrentDecoderConfig', transformer.TransformerConfig, 'ConvolutionalDecoderConfig',
+                      'RecurrentLanguageModelConfig']
 
 
 def get_decoder(config: DecoderConfig, prefix: str = '') -> 'Decoder':
@@ -903,6 +904,284 @@ class RecurrentDecoder(Decoder):
 
         hidden = gate * mapped_rnn_output + (1 - gate) * mapped_context
 
+        if self.config.layer_normalization:
+            hidden = self.hidden_norm.normalize(hidden)
+
+        # hidden: (batch_size, rnn_num_hidden)
+        hidden = mx.sym.Activation(data=hidden, act_type="tanh",
+                                   name="%snext_hidden_t%d" % (self.prefix, seq_idx))
+        return hidden
+
+
+class RecurrentLanguageModelConfig(Config):
+    """
+    Recurrent language model configuration.
+
+    :param max_seq_len_source: Maximum source sequence length
+    :param rnn_config: RNN configuration.
+    :param layer_normalization: Apply layer normalization.
+    :param dtype: Data type.
+    """
+
+    def __init__(self,
+                 max_seq_len_source: int,
+                 rnn_config: rnn.RNNConfig,
+                 layer_normalization: bool = False,
+                 dtype: str = C.DTYPE_FP32) -> None:
+        super().__init__()
+        self.max_seq_len_source = max_seq_len_source
+        self.rnn_config = rnn_config
+        self.layer_normalization = layer_normalization
+        self.dtype = dtype
+
+
+@Decoder.register(RecurrentLanguageModelConfig, C.RNN_DECODER_PREFIX)
+class RecurrentLanguageModel(Decoder):
+    """
+    RNN Language Model
+
+    :param config: Configuration for recurrent language model.
+    :param prefix: Decoder symbol prefix.
+    """
+
+    def __init__(self,
+                 config: RecurrentLanguageModelConfig,
+                 prefix: str = C.RNN_DECODER_PREFIX) -> None:
+        super().__init__(config.dtype)
+        self.config = config
+        self.rnn_config = config.rnn_config
+        self.prefix = prefix
+
+        self.num_hidden = self.rnn_config.num_hidden
+
+        if self.rnn_config.residual:
+            utils.check_condition(self.config.rnn_config.first_residual_layer >= 2,
+                                  "Residual connections on the first decoder layer are not supported as input and "
+                                  "output dimensions do not match.")
+
+        # Stacked RNN
+        self.stacked_rnn = rnn.get_stacked_rnn(self.rnn_config, self.prefix, parallel_inputs=False)
+        self.stacked_rnn_n_states = len(self.stacked_rnn.state_shape)
+
+        # Hidden state parameters
+        self.hidden_w = mx.sym.Variable("%shidden_weight" % prefix)
+        self.hidden_b = mx.sym.Variable("%shidden_bias" % prefix)
+        self.hidden_norm = layers.LayerNormalization(self.num_hidden,
+                                                     prefix="%shidden_norm" % prefix) \
+            if self.config.layer_normalization else None
+
+    def decode_sequence(self,
+                        source_encoded: mx.sym.Symbol,
+                        source_encoded_lengths: mx.sym.Symbol,
+                        source_encoded_max_length: int,
+                        target_embed: mx.sym.Symbol,
+                        target_embed_lengths: mx.sym.Symbol,
+                        target_embed_max_length: int) -> mx.sym.Symbol:
+        """
+        Decodes a sequence of embedded target words and returns sequence of last decoder
+        representations for each time step.
+
+        :param source_encoded: Encoded source: (batch_size, source_encoded_max_length, encoder_depth).
+        :param source_encoded_lengths: Lengths of encoded source sequences. Shape: (batch_size,).
+        :param source_encoded_max_length: Size of encoder time dimension.
+        :param target_embed: Embedded target sequence. Shape: (batch_size, target_embed_max_length, target_num_embed).
+        :param target_embed_lengths: Lengths of embedded target sequences. Shape: (batch_size,).
+        :param target_embed_max_length: Dimension of the embedded target sequence.
+        :return: Decoder data. Shape: (batch_size, target_embed_max_length, decoder_depth).
+        """
+
+        # target_embed: target_seq_len * (batch_size, num_target_embed)
+        target_embed = mx.sym.split(data=target_embed, num_outputs=target_embed_max_length, axis=1, squeeze_axis=True)
+
+        # initialize decoder states
+        # hidden: (batch_size, rnn_num_hidden)
+        # layer_states: List[(batch_size, state_num_hidden]
+        state = self.get_initial_state(source_encoded, source_encoded_lengths)
+
+        # hidden_all: target_embed_max_length * (batch_size, rnn_num_hidden)
+        hidden_states = []  # type: List[mx.sym.Symbol]
+        # TODO: possible alternative: feed back the context vector instead of the hidden (see lamtram)
+        self.reset()
+        for seq_idx in range(target_embed_max_length):
+            # hidden: (batch_size, rnn_num_hidden)
+            state = self._step(target_embed[seq_idx], state, seq_idx)
+            hidden_states.append(state.hidden)
+
+        # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
+        return mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
+
+    def decode_step(self,
+                    step: int,
+                    target_embed_prev: mx.sym.Symbol,
+                    source_encoded_max_length: int,
+                    *states: mx.sym.Symbol) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, List[mx.sym.Symbol]]:
+        """
+        Decodes a single time step given the current step, the previous embedded target word,
+        and previous decoder states.
+        Returns decoder representation for the next prediction, attention probabilities, and next decoder states.
+        Implementations can maintain an arbitrary number of states.
+
+        :param step: Global step of inference procedure, starts with 1.
+        :param target_embed_prev: Previous target word embedding. Shape: (batch_size, target_num_embed).
+        :param source_encoded_max_length: Length of encoded source time dimension.
+        :param states: Arbitrary list of decoder states.
+        :return: logit inputs, attention probabilities, next decoder states.
+        """
+        source_encoded, source_encoded_length, prev_hidden, *layer_states = states
+
+        prev_state = RecurrentDecoderState(prev_hidden, list(layer_states))
+
+        # state.hidden: (batch_size, rnn_num_hidden)
+        # attention_state.dynamic_source: (batch_size, source_seq_len, coverage_num_hidden)
+        # attention_state.probs: (batch_size, source_seq_len)
+        state = self._step(target_embed_prev, prev_state)
+
+        new_states = [source_encoded,
+                      source_encoded_length,
+                      state.hidden] + state.layer_states
+
+        # no attention probs
+        attention_probs = mx.sym.sum(mx.sym.zeros_like(source_encoded), axis=2, keepdims=False)
+
+        return state.hidden, attention_probs, new_states
+
+    def reset(self):
+        """
+        Calls reset on the RNN cell.
+        """
+        self.stacked_rnn.reset()
+        # Shallow copy of cells
+        cells_to_reset = list(self.stacked_rnn._cells)
+        for cell in cells_to_reset:
+            # TODO remove this once mxnet.rnn.ModifierCell.reset() invokes reset() of base_cell
+            if isinstance(cell, mx.rnn.ModifierCell):
+                cell.base_cell.reset()
+            cell.reset()
+
+    def get_num_hidden(self) -> int:
+        """
+        :return: The representation size of this decoder.
+        """
+        return self.num_hidden
+
+    def init_states(self,
+                    source_encoded: mx.sym.Symbol,
+                    source_encoded_lengths: mx.sym.Symbol,
+                    source_encoded_max_length: int) -> List[mx.sym.Symbol]:
+        """
+        Returns a list of symbolic states that represent the initial states of this decoder.
+        Used for inference.
+
+        :param source_encoded: Encoded source. Shape: (batch_size, source_encoded_max_length, encoder_depth).
+        :param source_encoded_lengths: Lengths of encoded source sequences. Shape: (batch_size,).
+        :param source_encoded_max_length: Size of encoder time dimension.
+        :return: List of symbolic initial states.
+        """
+        hidden, layer_states = self.get_initial_state(source_encoded, source_encoded_lengths)
+        states = [source_encoded, source_encoded_lengths, hidden] + layer_states
+        return states
+
+    def state_variables(self, target_max_length: int) -> List[mx.sym.Symbol]:
+        """
+        Returns the list of symbolic variables for this decoder to be used during inference.
+
+        :param target_max_length: Current target sequence lengths.
+        :return: List of symbolic variables.
+        """
+        return [mx.sym.Variable(C.SOURCE_ENCODED_NAME),
+                mx.sym.Variable(C.SOURCE_LENGTH_NAME),
+                mx.sym.Variable(C.HIDDEN_PREVIOUS_NAME)] + \
+               [mx.sym.Variable("%senc2decinit_%d" % (self.prefix, i)) for i in
+                range(len(sum([self.stacked_rnn.state_info], [])))]
+
+    def state_shapes(self,
+                     batch_size: int,
+                     target_max_length: int,
+                     source_encoded_max_length: int,
+                     source_encoded_depth: int) -> List[mx.io.DataDesc]:
+        """
+        Returns a list of shape descriptions given batch size, encoded source max length and encoded source depth.
+        Used for inference.
+
+        :param batch_size: Batch size during inference.
+        :param target_max_length: Current target sequence length.
+        :param source_encoded_max_length: Size of encoder time dimension.
+        :param source_encoded_depth: Depth of encoded source.
+        :return: List of shape descriptions.
+        """
+        return [mx.io.DataDesc(C.SOURCE_ENCODED_NAME,
+                               (batch_size, source_encoded_max_length, source_encoded_depth),
+                               layout=C.BATCH_MAJOR),
+                mx.io.DataDesc(C.SOURCE_LENGTH_NAME,
+                               (batch_size,),
+                               layout="N"),
+                mx.io.DataDesc(C.HIDDEN_PREVIOUS_NAME,
+                               (batch_size, self.num_hidden),
+                               layout="NC")] + \
+               [mx.io.DataDesc("%senc2decinit_%d" % (self.prefix, i),
+                               (batch_size, num_hidden),
+                               layout=C.BATCH_MAJOR) for i, (_, num_hidden) in enumerate(
+                   sum([self.stacked_rnn.state_shape], [])
+               )]
+
+    def get_initial_state(self,
+                          source_encoded: mx.sym.Symbol,
+                          source_encoded_length: mx.sym.Symbol) -> RecurrentDecoderState:
+        """
+        Computes initial states of the decoder, hidden state, and one for each RNN layer.
+        Optionally, init states for RNN layers are computed using 1 non-linear FC
+        with the last state of the encoder as input.
+
+        :param source_encoded: Concatenated encoder states. Shape: (batch_size, source_seq_len, encoder_num_hidden).
+        :param source_encoded_length: Lengths of source sequences. Shape: (batch_size,).
+        :return: Decoder state.
+        """
+        # we derive the shape of hidden and layer_states from some input to enable
+        # shape inference for the batch dimension during inference.
+        # (batch_size, 1)
+        zeros = mx.sym.expand_dims(mx.sym.zeros_like(source_encoded_length), axis=1)
+
+        # decoder hidden state
+        hidden = mx.sym.tile(data=zeros, reps=(1, self.num_hidden))
+
+        # initial states for each layer
+        layer_states = []
+        for state_idx, (_, init_num_hidden) in enumerate(sum([self.stacked_rnn.state_shape], [])):
+            init = mx.sym.tile(data=zeros, reps=(1, init_num_hidden))
+            layer_states.append(init)
+
+        return RecurrentDecoderState(hidden, layer_states)
+
+    def _step(self, word_vec_prev: mx.sym.Symbol,
+              state: RecurrentDecoderState,
+              seq_idx: int = 0) -> RecurrentDecoderState:
+
+        """
+        Performs single-time step in the RNN, given previous word vector, previous hidden state, and RNN layer states.
+
+        :param word_vec_prev: Embedding of previous target word. Shape: (batch_size, num_target_embed).
+        :param state: Decoder state consisting of hidden and layer states.
+        :param seq_idx: Decoder time step.
+        :return: new decoder state.
+        """
+        # concat previous word embedding and previous hidden state
+        rnn_input = mx.sym.concat(word_vec_prev, state.hidden, dim=1,
+                                  name="%sconcat_target_context_t%d" % (self.prefix, seq_idx))
+        # stacked_rnn_output: (batch_size, rnn_num_hidden)
+        # stacked_rnn_layer_states: num_layers * [batch_size, rnn_num_hidden]
+        stacked_rnn_output, stacked_rnn_layer_states = \
+            self.stacked_rnn(rnn_input, state.layer_states[:self.stacked_rnn_n_states])
+
+        hidden = self._hidden_mlp(stacked_rnn_output, seq_idx)
+
+        return RecurrentDecoderState(hidden, stacked_rnn_layer_states)
+
+    def _hidden_mlp(self, hidden_concat: mx.sym.Symbol, seq_idx: int) -> mx.sym.Symbol:
+        hidden = mx.sym.FullyConnected(data=hidden_concat,
+                                       num_hidden=self.num_hidden,  # to state size of RNN
+                                       weight=self.hidden_w,
+                                       bias=self.hidden_b,
+                                       name='%shidden_fc_t%d' % (self.prefix, seq_idx))
         if self.config.layer_normalization:
             hidden = self.hidden_norm.normalize(hidden)
 
