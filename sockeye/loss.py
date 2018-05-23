@@ -87,6 +87,31 @@ class Loss(ABC):
         """
         pass
 
+class DissimilarityLoss(Loss):
+    """
+    Computes the dissimilarity loss.
+
+    :param loss_config: Loss configuration
+    """
+    def __init__(self, loss_config: LossConfig) -> None:
+        logger.info("Loss: DissimilarityLoss")
+
+    def get_loss(self, input_embeddings: mx.sym.Symbol, target_embeddings: mx.sym.Symbol) -> List[mx.sym.Symbol]:
+        """
+        Returns cosine distance between input and target embeddings.
+
+        :param input_embeddings: Shape: (batch_size * target_seq_len, target_embed_size).
+        :param target_embeddings: Shape: (batch_size * target_seq_len, target_embed_size).
+        :return: List of loss symbol.
+        """
+        # normalize embeddings
+        # input_embeddings = input_embeddings / mx.sym.norm(input_embeddings, axis=1)
+        # target_embeddings = target_embeddings / mx.sym.norm(target_embeddings, axis=1)
+
+        input_embeddings = mx.sym.expand_dims(input_embeddings, axis=1)
+        target_embeddings = mx.sym.expand_dims(target_embeddings, axis=2)
+        distance = mx.sym.batch_dot(input_embeddings, target_embeddings)[:, 0, 0]
+        return [mx.sym.log(mx.sym.exp(-distance) + 1)]
 
 class CrossEntropyLoss(Loss):
     """

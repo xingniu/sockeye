@@ -43,6 +43,8 @@ def main():
     if args.language_model:
         args.beam_size = 1
         args.output_type = C.OUTPUT_HANDLER_TRANSLATION_WITH_SCORE
+        args.length_penalty_alpha = 1.0
+        args.length_penalty_beta = 0.0
 
     if args.output is not None:
         global logger

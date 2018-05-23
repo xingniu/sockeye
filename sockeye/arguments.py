@@ -665,6 +665,15 @@ def add_training_args(params):
                               action='store_true',
                               help='Train a language model instead of a NMT system. Default: %(default)s.')
 
+    train_params.add_argument('--unsupervised-training',
+                              action='store_true',
+                              help='Use only monolingual corpora for training. Default: %(default)s.')
+
+    train_params.add_argument('--weight-reconstruction-loss',
+                              type=float,
+                              default=1.0,
+                              help='Weight for the reconstruction loss during unsupervised training. Default: %(default)s.')
+
     train_params.add_argument('--batch-size', '-b',
                               type=int_greater_or_equal(1),
                               default=64,
