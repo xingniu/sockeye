@@ -557,7 +557,25 @@ def create_language_model_config(args: argparse.Namespace) -> Tuple[encoder.Enco
     config_decoder = None  # type: Optional[Config]
 
     if args.decoder == C.TRANSFORMER_TYPE:
-        raise NotImplementedError()
+        config_encoder = encoder.EmptyEncoderConfig(
+            num_hidden=args.rnn_num_hidden)
+
+        _, decoder_transformer_preprocess = args.transformer_preprocess
+        _, decoder_transformer_postprocess = args.transformer_postprocess
+        config_decoder = transformer.TransformerLanguageModelConfig(
+            model_size=args.transformer_model_size,
+            attention_heads=args.transformer_attention_heads,
+            feed_forward_num_hidden=args.transformer_feed_forward_num_hidden,
+            act_type=args.transformer_activation_type,
+            num_layers=decoder_num_layers,
+            dropout_attention=args.transformer_dropout_attention,
+            dropout_act=args.transformer_dropout_act,
+            dropout_prepost=args.transformer_dropout_prepost,
+            positional_embedding_type=args.transformer_positional_embedding_type,
+            preprocess_sequence=decoder_transformer_preprocess,
+            postprocess_sequence=decoder_transformer_postprocess,
+            max_seq_len_source=max_seq_len_source,
+            max_seq_len_target=max_seq_len_target)
     elif args.decoder == C.CONVOLUTION_TYPE:
         raise NotImplementedError()
     else:

@@ -60,6 +60,41 @@ class TransformerConfig(config.Config):
         self.dtype = dtype
 
 
+class TransformerLanguageModelConfig(TransformerConfig):
+
+    def __init__(self,
+                 model_size: int,
+                 attention_heads: int,
+                 feed_forward_num_hidden: int,
+                 act_type: str,
+                 num_layers: int,
+                 dropout_attention: float,
+                 dropout_act: float,
+                 dropout_prepost: float,
+                 positional_embedding_type: str,
+                 preprocess_sequence: str,
+                 postprocess_sequence: str,
+                 max_seq_len_source: int,
+                 max_seq_len_target: int,
+                 dtype: str = C.DTYPE_FP32) -> None:  # type: ignore
+        super().__init__(
+                model_size=model_size,
+                attention_heads=attention_heads,
+                feed_forward_num_hidden=feed_forward_num_hidden,
+                act_type=act_type,
+                num_layers=num_layers,
+                dropout_attention=dropout_attention,
+                dropout_act=dropout_act,
+                dropout_prepost=dropout_prepost,
+                positional_embedding_type=positional_embedding_type,
+                preprocess_sequence=preprocess_sequence,
+                postprocess_sequence=postprocess_sequence,
+                max_seq_len_source=max_seq_len_source,
+                max_seq_len_target=max_seq_len_target,
+                conv_config=None,
+                dtype=dtype)
+
+
 class TransformerEncoderBlock:
     """
     A transformer encoder block consists self-attention and a feed-forward layer with pre/post process blocks
@@ -180,6 +215,61 @@ class TransformerDecoderBlock:
                                             memory=source,
                                             bias=source_bias)
         target = self.post_enc_attention(target_enc_att, target)
+
+        # feed-forward
+        target_ff = self.ff(self.pre_ff(target, None))
+        target = self.post_ff(target_ff, target)
+
+        return target
+
+
+class TransformerLanguageModelBlock:
+    """
+    A transformer language model block consists self-attention and a feed-forward layer
+    with pre/post process blocks in between.
+    """
+
+    def __init__(self,
+                 config: TransformerConfig,
+                 prefix: str) -> None:
+        self.prefix = prefix
+        self.pre_self_attention = TransformerProcessBlock(sequence=config.preprocess_sequence,
+                                                          num_hidden=config.model_size,
+                                                          dropout=config.dropout_prepost,
+                                                          prefix="%satt_self_pre_" % prefix)
+        self.self_attention = layers.MultiHeadSelfAttention(depth_att=config.model_size,
+                                                            heads=config.attention_heads,
+                                                            depth_out=config.model_size,
+                                                            dropout=config.dropout_attention,
+                                                            prefix="%satt_self_" % prefix)
+        self.post_self_attention = TransformerProcessBlock(sequence=config.postprocess_sequence,
+                                                           num_hidden=config.model_size,
+                                                           dropout=config.dropout_prepost,
+                                                           prefix="%satt_self_post_" % prefix)
+
+        self.pre_ff = TransformerProcessBlock(sequence=config.preprocess_sequence,
+                                              num_hidden=config.model_size,
+                                              dropout=config.dropout_prepost,
+                                              prefix="%sff_pre_" % prefix)
+        self.ff = TransformerFeedForward(num_hidden=config.feed_forward_num_hidden,
+                                         num_model=config.model_size,
+                                         act_type=config.act_type,
+                                         dropout=config.dropout_act,
+                                         prefix="%sff_" % prefix)
+        self.post_ff = TransformerProcessBlock(sequence=config.postprocess_sequence,
+                                               num_hidden=config.model_size,
+                                               dropout=config.dropout_prepost,
+                                               prefix="%sff_post_" % prefix)
+
+    def __call__(self,
+                 target: mx.sym.Symbol,
+                 target_bias: mx.sym.Symbol,
+                 cache: Optional[Dict[str, Optional[mx.sym.Symbol]]] = None) -> mx.sym.Symbol:
+        # self-attention
+        target_self_att = self.self_attention(inputs=self.pre_self_attention(target, None),
+                                              bias=target_bias,
+                                              cache=cache)
+        target = self.post_self_attention(target_self_att, target)
 
         # feed-forward
         target_ff = self.ff(self.pre_ff(target, None))

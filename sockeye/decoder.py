@@ -32,7 +32,7 @@ from .config import Config
 
 logger = logging.getLogger(__name__)
 DecoderConfig = Union['RecurrentDecoderConfig', transformer.TransformerConfig, 'ConvolutionalDecoderConfig',
-                      'RecurrentLanguageModelConfig']
+                      'RecurrentLanguageModelConfig', transformer.TransformerLanguageModelConfig]
 
 
 def get_decoder(config: DecoderConfig, prefix: str = '') -> 'Decoder':
@@ -429,6 +429,215 @@ class TransformerDecoder(Decoder):
         #  The positional embeddings potentially pose a limit on the maximum length at inference time.
         return self.pos_embedding.get_max_seq_len()
 
+
+@Decoder.register(transformer.TransformerLanguageModelConfig, C.TRANSFORMER_DECODER_PREFIX)
+class TransformerLanguageModel(Decoder):
+    """
+    Transformer Language Model
+
+    :param config: Configuration for Transformer language model.
+    :param prefix: Name prefix for symbols of this decoder.
+    """
+
+    def __init__(self,
+                 config: transformer.TransformerLanguageModelConfig,
+                 prefix: str = C.TRANSFORMER_DECODER_PREFIX) -> None:
+        super().__init__(config.dtype)
+        self.config = config
+        self.prefix = prefix
+        self.layers = [transformer.TransformerLanguageModelBlock(
+            config, prefix="%s%d_" % (prefix, i)) for i in range(config.num_layers)]
+        self.final_process = transformer.TransformerProcessBlock(sequence=config.preprocess_sequence,
+                                                                 num_hidden=config.model_size,
+                                                                 dropout=config.dropout_prepost,
+                                                                 prefix="%sfinal_process_" % prefix)
+
+        self.pos_embedding = encoder.get_positional_embedding(config.positional_embedding_type,
+                                                              config.model_size,
+                                                              max_seq_len=config.max_seq_len_target,
+                                                              fixed_pos_embed_scale_up_input=True,
+                                                              fixed_pos_embed_scale_down_positions=False,
+                                                              prefix=C.TARGET_POSITIONAL_EMBEDDING_PREFIX)
+
+    def decode_sequence(self,
+                        source_encoded: mx.sym.Symbol,
+                        source_encoded_lengths: mx.sym.Symbol,
+                        source_encoded_max_length: int,
+                        target_embed: mx.sym.Symbol,
+                        target_embed_lengths: mx.sym.Symbol,
+                        target_embed_max_length: int) -> mx.sym.Symbol:
+        """
+        Decodes a sequence of embedded target words and returns sequence of last decoder
+        representations for each time step.
+
+        :param source_encoded: Encoded source: (batch_size, source_encoded_max_length, encoder_depth).
+        :param source_encoded_lengths: Lengths of encoded source sequences. Shape: (batch_size,).
+        :param source_encoded_max_length: Size of encoder time dimension.
+        :param target_embed: Embedded target sequence. Shape: (batch_size, target_embed_max_length, target_num_embed).
+        :param target_embed_lengths: Lengths of embedded target sequences. Shape: (batch_size,).
+        :param target_embed_max_length: Dimension of the embedded target sequence.
+        :return: Decoder data. Shape: (batch_size, target_embed_max_length, decoder_depth).
+        """
+
+        # (1, target_max_length, target_max_length)
+        target_bias = transformer.get_autoregressive_bias(target_embed_max_length, name="%starget_bias" % self.prefix)
+
+        # target: (batch_size, target_max_length, model_size)
+        target, _, target_max_length = self.pos_embedding.encode(target_embed, None, target_embed_max_length)
+
+        if self.config.dropout_prepost > 0.0:
+            target = mx.sym.Dropout(data=target, p=self.config.dropout_prepost)
+
+        for layer in self.layers:
+            target = layer(target=target,
+                           target_bias=target_bias)
+        target = self.final_process(data=target, prev=None)
+
+        if mx.sym.sum(source_encoded_lengths) < 0:
+            # Never happens, a fake use of source_encoded.
+            return mx.sym.broadcast_add(target, mx.sym.sum(source_encoded_lengths) * 0)
+        else:
+            return target
+
+    def decode_step(self,
+                    step: int,
+                    target_embed_prev: mx.sym.Symbol,
+                    source_encoded_max_length: int,
+                    *states: mx.sym.Symbol) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, List[mx.sym.Symbol]]:
+        """
+        Decodes a single time step given the current step, the previous embedded target word,
+        and previous decoder states.
+        Returns decoder representation for the next prediction, attention probabilities, and next decoder states.
+        Implementations can maintain an arbitrary number of states.
+
+        :param step: Global step of inference procedure, starts with 1.
+        :param target_embed_prev: Previous target word embedding. Shape: (batch_size, target_num_embed).
+        :param source_encoded_max_length: Length of encoded source time dimension.
+        :param states: Arbitrary list of decoder states.
+        :return: logit inputs, attention probabilities, next decoder states.
+        """
+        # for step > 1, states contains source_encoded, source_encoded_lengths, and cache tensors.
+        source_encoded, source_encoded_lengths, *cache = states  # type: ignore
+
+        # symbolic indices of the previous word
+        indices = mx.sym.arange(start=step - 1, stop=step, step=1, name='indices')
+        # (batch_size, num_embed)
+        target_embed_prev = self.pos_embedding.encode_positions(indices, target_embed_prev)
+        # (batch_size, 1, num_embed)
+        target = mx.sym.expand_dims(target_embed_prev, axis=1)
+
+        # auto-regressive bias for last position in sequence
+        # (1, target_max_length, target_max_length)
+        target_bias = transformer.get_autoregressive_bias(step, name="%sbias" % self.prefix)
+        target_bias = mx.sym.slice_axis(target_bias, axis=1, begin=-1, end=step)
+
+        new_states = [source_encoded, source_encoded_lengths]
+        layer_caches = self._get_cache_per_layer(cast(List[mx.sym.Symbol], cache))
+        for layer, layer_cache in zip(self.layers, layer_caches):
+            target = layer(target=target,
+                           target_bias=target_bias,
+                           cache=layer_cache)
+            # store updated keys and values in states list.
+            # (layer.__call__() has the side-effect of updating contents of layer_cache)
+            new_states += [layer_cache['k'], layer_cache['v']]
+
+        # (batch_size, 1, model_size)
+        target = self.final_process(data=target, prev=None)
+        # (batch_size, model_size)
+        target = mx.sym.reshape(target, shape=(-3, -1))
+
+        # no attention probs
+        attention_probs = mx.sym.sum(mx.sym.zeros_like(source_encoded), axis=2, keepdims=False)
+
+        return target, attention_probs, new_states
+
+
+    def _get_cache_per_layer(self, cache: List[mx.sym.Symbol]) -> List[Dict[str, Optional[mx.sym.Symbol]]]:
+        """
+        For decoder time steps > 1 there will be cache tensors available that contain
+        previously computed key & value tensors for each transformer layer.
+
+        :param cache: List of states passed to decode_step().
+        :return: List of layer cache dictionaries.
+        """
+        if not cache:  # first decoder step
+            return [{'k': None, 'v': None} for _ in range(len(self.layers))]
+        else:
+            assert len(cache) == len(self.layers) * 2
+            return [{'k': cache[2 * l + 0], 'v': cache[2 * l + 1]} for l in range(len(self.layers))]
+
+    def reset(self):
+        pass
+
+    def get_num_hidden(self) -> int:
+        """
+        :return: The representation size of this decoder.
+        """
+        return self.config.model_size
+
+    def init_states(self,
+                    source_encoded: mx.sym.Symbol,
+                    source_encoded_lengths: mx.sym.Symbol,
+                    source_encoded_max_length: int) -> List[mx.sym.Symbol]:
+        """
+        Returns a list of symbolic states that represent the initial states of this decoder.
+        Used for inference.
+
+        :param source_encoded: Encoded source. Shape: (batch_size, source_encoded_max_length, encoder_depth).
+        :param source_encoded_lengths: Lengths of encoded source sequences. Shape: (batch_size,).
+        :param source_encoded_max_length: Size of encoder time dimension.
+        :return: List of symbolic initial states.
+        """
+        return [source_encoded, source_encoded_lengths]
+
+    def state_variables(self, target_max_length: int) -> List[mx.sym.Symbol]:
+        """
+        Returns the list of symbolic variables for this decoder to be used during inference.
+
+        :param target_max_length: Current target sequence length.
+        :return: List of symbolic variables.
+        """
+        variables = [mx.sym.Variable(C.SOURCE_ENCODED_NAME),
+                     mx.sym.Variable(C.SOURCE_LENGTH_NAME)]
+        if target_max_length > 1:  # no cache for initial decoder step
+            for l in range(len(self.layers)):
+                variables.append(mx.sym.Variable('cache_l%d_k' % l))
+                variables.append(mx.sym.Variable('cache_l%d_v' % l))
+        return variables
+
+    def state_shapes(self,
+                     batch_size: int,
+                     target_max_length: int,
+                     source_encoded_max_length: int,
+                     source_encoded_depth: int) -> List[mx.io.DataDesc]:
+        """
+        Returns a list of shape descriptions given batch size, encoded source max length and encoded source depth.
+        Used for inference.
+
+        :param batch_size: Batch size during inference.
+        :param target_max_length: Current target sequence length.
+        :param source_encoded_max_length: Size of encoder time dimension.
+        :param source_encoded_depth: Depth of encoded source.
+        :return: List of shape descriptions.
+        """
+        shapes = [mx.io.DataDesc(C.SOURCE_ENCODED_NAME,
+                                 (batch_size, source_encoded_max_length, source_encoded_depth),
+                                 layout=C.BATCH_MAJOR),
+                  mx.io.DataDesc(C.SOURCE_LENGTH_NAME, (batch_size,), layout="N")]
+
+        if target_max_length > 1:  # no cache for initial decoder step
+            for l in range(len(self.layers)):
+                shapes.append(mx.io.DataDesc(name='cache_l%d_k' % l,
+                                             shape=(batch_size, target_max_length - 1, self.config.model_size),
+                                             layout=C.BATCH_MAJOR))
+                shapes.append(mx.io.DataDesc(name='cache_l%d_v' % l,
+                                             shape=(batch_size, target_max_length - 1, self.config.model_size),
+                                             layout=C.BATCH_MAJOR))
+        return shapes
+
+    def get_max_seq_len(self) -> Optional[int]:
+        #  The positional embeddings potentially pose a limit on the maximum length at inference time.
+        return self.pos_embedding.get_max_seq_len()
 
 RecurrentDecoderState = NamedTuple('RecurrentDecoderState', [
     ('hidden', mx.sym.Symbol),

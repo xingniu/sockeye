@@ -32,6 +32,14 @@ ENCODER_DECODER_SETTINGS = [
      " --decoder rnn --num-layers 2 --rnn-cell-type lstm --rnn-num-hidden 21 --num-embed 21:13"
      " --batch-size 8 --loss cross-entropy --optimized-metric perplexity --max-updates 10"
      " --checkpoint-frequency 10 --optimizer adam --initial-learning-rate 0.01",
+     "--language-model"),
+     # Transformer language model
+    ("--language-model"
+     " --encoder rnn --decoder transformer --num-layers 2:2 --rnn-cell-type lstm --rnn-num-hidden 21 --num-embed 21:12"
+     " --transformer-attention-heads 2 --transformer-model-size 12"
+     " --transformer-feed-forward-num-hidden 32 --transformer-activation-type swish1"
+     " --batch-size 8 --max-updates 10"
+     " --checkpoint-frequency 10 --optimizer adam --initial-learning-rate 0.01",
      "--language-model")]
 
 
