@@ -278,7 +278,7 @@ class TransformerDecoder(Decoder):
         target_decoded = self.final_process(data=target, prev=None)
 
         # compute lengths: (batch_size,)
-        lengths = utils.compute_lengths(target_decoded)
+        lengths = mx.sym.ones_like(source_encoded_lengths) * target_embed_max_length
 
         return target_decoded, lengths, target_embed_max_length
 
@@ -610,7 +610,7 @@ class RecurrentDecoder(Decoder):
         # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
         target_decoded = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
         # compute lengths: (batch_size,)
-        lengths = utils.compute_lengths(target_decoded)
+        lengths = mx.sym.ones_like(source_encoded_lengths) * target_embed_max_length
 
         return target_decoded, lengths, target_embed_max_length
 
@@ -1082,7 +1082,7 @@ class RecurrentSelfDecoder(Decoder):
 
         target_decoded = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
         # lengths: (batch_size,)
-        lengths = utils.compute_lengths(target_decodeds)
+        lengths = mx.sym.ones_like(source_encoded_lengths) * target_embed_max_length
 
         # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
         return target_decoded, lengths, target_embed_max_length
@@ -1490,7 +1490,7 @@ class RecurrentLanguageModel(Decoder):
         # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
         target_decoded = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
         # compute lengths: (batch_size,)
-        lengths = utils.compute_lengths(target_decoded)
+        lengths = mx.sym.ones_like(source_encoded_lengths) * target_embed_max_length
 
         return target_decoded, lengths, target_embed_max_length
 
@@ -1791,7 +1791,7 @@ class ConvolutionalDecoder(Decoder):
                                      target_embed_max_length=target_embed_max_length)
 
         # compute lengths: (batch_size,)
-        lengths = utils.compute_lengths(target_decoded)
+        lengths = mx.sym.ones_like(source_encoded_lengths) * target_embed_max_length
 
         return target_decoded, lengths, target_embed_max_length
 

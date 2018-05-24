@@ -734,7 +734,7 @@ def create_model_config(args: argparse.Namespace,
         config_decoder = create_self_decoder_config(args, encoder_num_hidden)
         config_reconstruction_encoder, recon_enc_num_hidden = create_encoder_config(args, config_conv)
         config_reconstruction_decoder = create_decoder_config(args, recon_enc_num_hidden)
-        config_language_model = create_language_model_config_config(args)
+        _, config_language_model = create_language_model_config(args)
     else:
         config_encoder, encoder_num_hidden = create_encoder_config(args, config_conv)
         config_decoder = create_decoder_config(args, encoder_num_hidden)
@@ -772,7 +772,7 @@ def create_model_config(args: argparse.Namespace,
                                      weight_tying=args.weight_tying,
                                      weight_tying_type=args.weight_tying_type if args.weight_tying else None,
                                      weight_normalization=args.weight_normalization,
-                                     weight_reconstruction_loss=args.weight_reconstruction_loss,
+                                     weight_language_model_loss=args.weight_language_model_loss,
                                      lhuc=args.lhuc is not None)
     return model_config
 

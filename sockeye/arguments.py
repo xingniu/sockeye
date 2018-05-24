@@ -669,10 +669,10 @@ def add_training_args(params):
                               action='store_true',
                               help='Use only monolingual corpora for training. Default: %(default)s.')
 
-    train_params.add_argument('--weight-reconstruction-loss',
+    train_params.add_argument('--weight-language-model-loss',
                               type=float,
                               default=1.0,
-                              help='Weight for the reconstruction loss during unsupervised training. Default: %(default)s.')
+                              help='Weight for language model loss during unsupervised training. Default: %(default)s.')
 
     train_params.add_argument('--batch-size', '-b',
                               type=int_greater_or_equal(1),

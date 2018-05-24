@@ -65,7 +65,7 @@ class ModelConfig(Config):
                  weight_tying: bool = False,
                  weight_tying_type: Optional[str] = C.WEIGHT_TYING_TRG_SOFTMAX,
                  weight_normalization: bool = False,
-                 weight_reconstruction_loss: float = 1.0,
+                 weight_language_model_loss: float = 1.0,
                  lhuc: bool = False) -> None:
         super().__init__()
         self.config_data = config_data
@@ -82,7 +82,7 @@ class ModelConfig(Config):
         self.weight_tying = weight_tying
         self.weight_tying_type = weight_tying_type
         self.weight_normalization = weight_normalization
-        self.weight_reconstruction_loss = weight_reconstruction_loss
+        self.weight_language_model_loss = weight_language_model_loss
         if weight_tying and weight_tying_type is None:
             raise RuntimeError("weight_tying_type must be specified when using weight_tying.")
         self.lhuc = lhuc

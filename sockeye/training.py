@@ -42,8 +42,193 @@ from .optimizers import BatchState, CheckpointState, SockeyeOptimizer, Optimizer
 
 logger = logging.getLogger(__name__)
 
+class TrainingModelBase(model.SockeyeModel):
+    def __init__(self, config: model.ModelConfig, prefix: str = '') -> None:
+        super().__init__(config)
 
-class TrainingModel(model.SockeyeModel):
+    def run_forward_backward(self, batch: mx.io.DataBatch, metric: mx.metric.EvalMetric):
+        """
+        Runs forward/backward pass and updates training metric(s).
+        """
+        self.module.forward_backward(batch)
+        self.module.update_metric(metric, batch.label)
+
+    def update(self):
+        """
+        Updates parameters of the module.
+        """
+        self.module.update()
+
+    def get_gradients(self) -> Dict[str, List[mx.nd.NDArray]]:
+        """
+        Returns a mapping of parameters to gradient arrays, summed across devices.
+        """
+        return {name: mx.nd.add_n(*(exe.grad_arrays[i] for exe in self.executors)) for i, name in
+                enumerate(self.executor_group.arg_names)
+                if name in self.executor_group.param_names and self.executors[0].grad_arrays[i] is not None}
+                # We may have None if not all parameters are optimized
+
+    def get_global_gradient_norm(self) -> float:
+        """
+        Returns global gradient norm.
+        """
+        # average norm across executors:
+        exec_norms = [global_norm([arr for arr in exe.grad_arrays if arr is not None]) for exe in self.executors]
+        norm_val = sum(exec_norms) / float(len(exec_norms))
+        norm_val *= self.optimizer.rescale_grad
+        return norm_val
+
+    def rescale_gradients(self, scale: float):
+        """
+        Rescales gradient arrays of executors by scale.
+        """
+        for exe in self.executors:
+            for arr in exe.grad_arrays:
+                if arr is None:
+                    continue
+                arr *= scale
+
+    def prepare_batch(self, batch: mx.io.DataBatch):
+        """
+        Pre-fetches the next mini-batch.
+
+        :param batch: The mini-batch to prepare.
+        """
+        self.module.prepare(batch)
+
+    def evaluate(self, eval_iter: data_io.BaseParallelSampleIter, eval_metric: mx.metric.EvalMetric):
+        """
+        Resets and recomputes evaluation metric on given data iterator.
+        """
+        for eval_batch in eval_iter:
+            self.module.forward(eval_batch, is_train=False)
+            self.module.update_metric(eval_metric, eval_batch.label)
+
+    @property
+    def current_module(self) -> mx.module.Module:
+        # As the BucketingModule does not expose all methods of the underlying Module we need to directly access
+        # the currently active module, when we use bucketing.
+        return self.module._curr_module if self._bucketing else self.module
+
+    @property
+    def executor_group(self):
+        return self.current_module._exec_group
+
+    @property
+    def executors(self):
+        return self.executor_group.execs
+
+    @property
+    def loss(self):
+        return self.model_loss
+
+    @property
+    def optimizer(self) -> Union[mx.optimizer.Optimizer, SockeyeOptimizer]:
+        """
+        Returns the optimizer of the underlying module.
+        """
+        # TODO: Push update to MXNet to expose the optimizer (Module should have a get_optimizer method)
+        return self.current_module._optimizer
+
+    def initialize_optimizer(self, config: OptimizerConfig):
+        """
+        Initializes the optimizer of the underlying module with an optimizer config.
+        """
+        self.module.init_optimizer(kvstore=config.kvstore,
+                                   optimizer=config.name,
+                                   optimizer_params=config.params,
+                                   force_init=True)  # force init for training resumption use case
+
+    def save_optimizer_states(self, fname: str):
+        """
+        Saves optimizer states to a file.
+
+        :param fname: File name to save optimizer states to.
+        """
+        self.current_module.save_optimizer_states(fname)
+
+    def load_optimizer_states(self, fname: str):
+        """
+        Loads optimizer states from file.
+
+        :param fname: File name to load optimizer states from.
+        """
+        self.current_module.load_optimizer_states(fname)
+
+    def initialize_parameters(self, initializer: mx.init.Initializer, allow_missing_params: bool):
+        """
+        Initializes the parameters of the underlying module.
+
+        :param initializer: Parameter initializer.
+        :param allow_missing_params: Whether to allow missing parameters.
+        """
+        self.module.init_params(initializer=initializer,
+                                arg_params=self.params,
+                                aux_params=self.aux_params,
+                                allow_missing=allow_missing_params,
+                                force_init=False)
+
+    def log_parameters(self):
+        """
+        Logs information about model parameters.
+        """
+        arg_params, aux_params = self.module.get_params()
+        total_parameters = 0
+        info = []  # type: List[str]
+        for name, array in sorted(arg_params.items()):
+            info.append("%s: %s" % (name, array.shape))
+            total_parameters += reduce(lambda x, y: x * y, array.shape)
+        logger.info("Model parameters: %s", ", ".join(info))
+        if self.fixed_param_names:
+            logger.info("Fixed model parameters: %s", ", ".join(self.fixed_param_names))
+        logger.info("Total # of parameters: %d", total_parameters)
+
+    def save_params_to_file(self, fname: str):
+        """
+        Synchronizes parameters across devices, saves the parameters to disk, and updates self.params
+        and self.aux_params.
+
+        :param fname: Filename to write parameters to.
+        """
+        arg_params, aux_params = self.module.get_params()
+        self.module.set_params(arg_params, aux_params)
+        self.params = arg_params
+        self.aux_params = aux_params
+        super().save_params_to_file(fname)
+
+    def load_params_from_file(self, fname: str, allow_missing_params: bool = False):
+        """
+        Loads parameters from a file and sets the parameters of the underlying module and this model instance.
+
+        :param fname: File name to load parameters from.
+        :param allow_missing_params: If set, the given parameters are allowed to be a subset of the Module parameters.
+        """
+        super().load_params_from_file(fname)  # sets self.params & self.aux_params
+        self.module.set_params(arg_params=self.params,
+                               aux_params=self.aux_params,
+                               allow_missing=allow_missing_params)
+
+    def install_monitor(self, monitor_pattern: str, monitor_stat_func_name: str):
+        """
+        Installs an MXNet monitor onto the underlying module.
+
+        :param monitor_pattern: Pattern string.
+        :param monitor_stat_func_name: Name of monitor statistics function.
+        """
+        self._monitor = mx.monitor.Monitor(interval=C.MEASURE_SPEED_EVERY,
+                                           stat_func=C.MONITOR_STAT_FUNCS.get(monitor_stat_func_name),
+                                           pattern=monitor_pattern,
+                                           sort=True)
+        self.module.install_monitor(self._monitor)
+        logger.info("Installed MXNet monitor; pattern='%s'; statistics_func='%s'",
+                    monitor_pattern, monitor_stat_func_name)
+
+    @property
+    def monitor(self) -> Optional[mx.monitor.Monitor]:
+        return self._monitor
+
+
+class TrainingModel(TrainingModelBase):
     """
     TrainingModel is a SockeyeModel that fully unrolls over source and target sequences.
 
@@ -184,188 +369,7 @@ class TrainingModel(model.SockeyeModel):
         self.save_version(self.output_dir)
         self.save_config(self.output_dir)
 
-    def run_forward_backward(self, batch: mx.io.DataBatch, metric: mx.metric.EvalMetric):
-        """
-        Runs forward/backward pass and updates training metric(s).
-        """
-        self.module.forward_backward(batch)
-        self.module.update_metric(metric, batch.label)
-
-    def update(self):
-        """
-        Updates parameters of the module.
-        """
-        self.module.update()
-
-    def get_gradients(self) -> Dict[str, List[mx.nd.NDArray]]:
-        """
-        Returns a mapping of parameters to gradient arrays, summed across devices.
-        """
-        return {name: mx.nd.add_n(*(exe.grad_arrays[i] for exe in self.executors)) for i, name in
-                enumerate(self.executor_group.arg_names)
-                if name in self.executor_group.param_names and self.executors[0].grad_arrays[i] is not None}
-                # We may have None if not all parameters are optimized
-
-    def get_global_gradient_norm(self) -> float:
-        """
-        Returns global gradient norm.
-        """
-        # average norm across executors:
-        exec_norms = [global_norm([arr for arr in exe.grad_arrays if arr is not None]) for exe in self.executors]
-        norm_val = sum(exec_norms) / float(len(exec_norms))
-        norm_val *= self.optimizer.rescale_grad
-        return norm_val
-
-    def rescale_gradients(self, scale: float):
-        """
-        Rescales gradient arrays of executors by scale.
-        """
-        for exe in self.executors:
-            for arr in exe.grad_arrays:
-                if arr is None:
-                    continue
-                arr *= scale
-
-    def prepare_batch(self, batch: mx.io.DataBatch):
-        """
-        Pre-fetches the next mini-batch.
-
-        :param batch: The mini-batch to prepare.
-        """
-        self.module.prepare(batch)
-
-    def evaluate(self, eval_iter: data_io.BaseParallelSampleIter, eval_metric: mx.metric.EvalMetric):
-        """
-        Resets and recomputes evaluation metric on given data iterator.
-        """
-        for eval_batch in eval_iter:
-            self.module.forward(eval_batch, is_train=False)
-            self.module.update_metric(eval_metric, eval_batch.label)
-
-    @property
-    def current_module(self) -> mx.module.Module:
-        # As the BucketingModule does not expose all methods of the underlying Module we need to directly access
-        # the currently active module, when we use bucketing.
-        return self.module._curr_module if self._bucketing else self.module
-
-    @property
-    def executor_group(self):
-        return self.current_module._exec_group
-
-    @property
-    def executors(self):
-        return self.executor_group.execs
-
-    @property
-    def loss(self):
-        return self.model_loss
-
-    @property
-    def optimizer(self) -> Union[mx.optimizer.Optimizer, SockeyeOptimizer]:
-        """
-        Returns the optimizer of the underlying module.
-        """
-        # TODO: Push update to MXNet to expose the optimizer (Module should have a get_optimizer method)
-        return self.current_module._optimizer
-
-    def initialize_optimizer(self, config: OptimizerConfig):
-        """
-        Initializes the optimizer of the underlying module with an optimizer config.
-        """
-        self.module.init_optimizer(kvstore=config.kvstore,
-                                   optimizer=config.name,
-                                   optimizer_params=config.params,
-                                   force_init=True)  # force init for training resumption use case
-
-    def save_optimizer_states(self, fname: str):
-        """
-        Saves optimizer states to a file.
-
-        :param fname: File name to save optimizer states to.
-        """
-        self.current_module.save_optimizer_states(fname)
-
-    def load_optimizer_states(self, fname: str):
-        """
-        Loads optimizer states from file.
-
-        :param fname: File name to load optimizer states from.
-        """
-        self.current_module.load_optimizer_states(fname)
-
-    def initialize_parameters(self, initializer: mx.init.Initializer, allow_missing_params: bool):
-        """
-        Initializes the parameters of the underlying module.
-
-        :param initializer: Parameter initializer.
-        :param allow_missing_params: Whether to allow missing parameters.
-        """
-        self.module.init_params(initializer=initializer,
-                                arg_params=self.params,
-                                aux_params=self.aux_params,
-                                allow_missing=allow_missing_params,
-                                force_init=False)
-
-    def log_parameters(self):
-        """
-        Logs information about model parameters.
-        """
-        arg_params, aux_params = self.module.get_params()
-        total_parameters = 0
-        info = []  # type: List[str]
-        for name, array in sorted(arg_params.items()):
-            info.append("%s: %s" % (name, array.shape))
-            total_parameters += reduce(lambda x, y: x * y, array.shape)
-        logger.info("Model parameters: %s", ", ".join(info))
-        if self.fixed_param_names:
-            logger.info("Fixed model parameters: %s", ", ".join(self.fixed_param_names))
-        logger.info("Total # of parameters: %d", total_parameters)
-
-    def save_params_to_file(self, fname: str):
-        """
-        Synchronizes parameters across devices, saves the parameters to disk, and updates self.params
-        and self.aux_params.
-
-        :param fname: Filename to write parameters to.
-        """
-        arg_params, aux_params = self.module.get_params()
-        self.module.set_params(arg_params, aux_params)
-        self.params = arg_params
-        self.aux_params = aux_params
-        super().save_params_to_file(fname)
-
-    def load_params_from_file(self, fname: str, allow_missing_params: bool = False):
-        """
-        Loads parameters from a file and sets the parameters of the underlying module and this model instance.
-
-        :param fname: File name to load parameters from.
-        :param allow_missing_params: If set, the given parameters are allowed to be a subset of the Module parameters.
-        """
-        super().load_params_from_file(fname)  # sets self.params & self.aux_params
-        self.module.set_params(arg_params=self.params,
-                               aux_params=self.aux_params,
-                               allow_missing=allow_missing_params)
-
-    def install_monitor(self, monitor_pattern: str, monitor_stat_func_name: str):
-        """
-        Installs an MXNet monitor onto the underlying module.
-
-        :param monitor_pattern: Pattern string.
-        :param monitor_stat_func_name: Name of monitor statistics function.
-        """
-        self._monitor = mx.monitor.Monitor(interval=C.MEASURE_SPEED_EVERY,
-                                           stat_func=C.MONITOR_STAT_FUNCS.get(monitor_stat_func_name),
-                                           pattern=monitor_pattern,
-                                           sort=True)
-        self.module.install_monitor(self._monitor)
-        logger.info("Installed MXNet monitor; pattern='%s'; statistics_func='%s'",
-                    monitor_pattern, monitor_stat_func_name)
-
-    @property
-    def monitor(self) -> Optional[mx.monitor.Monitor]:
-        return self._monitor
-
-class UnsupervisedTrainingModel(SockeyeModel):
+class UnsupervisedTrainingModel(TrainingModelBase):
     """
     UnsupervisedTrainingModel is a SockeyeModel that uses only monolingual data.
 
@@ -396,7 +400,7 @@ class UnsupervisedTrainingModel(SockeyeModel):
         self.output_dir = output_dir
         self.fixed_param_names = fixed_param_names
         self._bucketing = bucketing
-        self._alpha = config.weight_reconstruction_loss
+        self._alpha = config.weight_language_model_loss
         self._gradient_compression_params = gradient_compression_params
         self._initialize(provide_data, provide_label, default_bucket_key)
         self._monitor = None  # type: Optional[mx.monitor.Monitor]
@@ -417,12 +421,11 @@ class UnsupervisedTrainingModel(SockeyeModel):
         labels = mx.sym.reshape(data=mx.sym.Variable(C.TARGET_LABEL_NAME), shape=(-1,))
 
         # reconstructor & language model
-        self.reconstruction_encoder = encoder.get_encoder(self.config.config_reconstruction_encoder, prefix=self.prefix)
-        self.reconstruction_decoder = decoder.get_decoder(self.config.config_reconstruction_decoder, prefix=self.prefix)
-        self.language_model_decoder = decoder.get_decoder(self.config.config_language_model, prefix=self.prefix)
+        self.reconstruction_encoder = encoder.get_encoder(self.config.config_reconstruction_encoder, prefix=self.prefix+'dual')
+        self.reconstruction_decoder = decoder.get_decoder(self.config.config_reconstruction_decoder, prefix=self.prefix+'dual')
+        self.language_model_decoder = decoder.get_decoder(self.config.config_language_model, prefix=self.prefix+'language')
 
         self.model_loss = loss.get_loss(self.config.config_loss)
-        self.dissimilarity_loss = DissimilarityLoss(None)
 
         data_names = [C.SOURCE_NAME, C.TARGET_NAME]
         label_names = [C.TARGET_LABEL_NAME]
@@ -464,7 +467,7 @@ class UnsupervisedTrainingModel(SockeyeModel):
              target_decoded_length,
              target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded, source_encoded_length, source_encoded_seq_len,
                                                                     None, None, target_embed_seq_len)
-
+            
             # reconstructor
             # recon_decoded: (batch_size, target_len, decoder_depth)
             # target must be the same as source input
@@ -473,13 +476,13 @@ class UnsupervisedTrainingModel(SockeyeModel):
              recon_encoded_seq_len) = self.reconstruction_encoder.encode(target_decoded, target_decoded_length, target_decoded_seq_len)
             (recon_decoded, _, _) = self.reconstruction_decoder.decode_sequence(recon_encoded, recon_encoded_length, recon_encoded_seq_len,
                                                                                 target_embed, target_embed_length, target_embed_seq_len)
-
-             # language model decoder
-             # language_decoded: (batch_size, target_decoded_length, decoder_depth)
-            trans_decoded = mx.sym.concat(target_embed[:, 0, :], target_decoded, dim=1)
-            (language_decoded, _, _) = self.language_model_decoder.decode_sequence(trans_decoded, target_decoded_length + 1, target_decoded_seq_len + 1,
-                                                                                   trans_decoded, target_decoded_length + 1, target_decoded_seq_len + 1)
-
+            
+            # language model decoder
+            # language_decoded: (batch_size, target_decoded_length, decoder_depth)
+            trans_decoded = mx.sym.slice_axis(mx.sym.concat(mx.sym.slice_axis(target_embed, axis=1, begin=0, end=1), target_decoded, dim=1), axis=1, begin=0, end=target_decoded_seq_len)
+            (language_decoded, _, _) = self.language_model_decoder.decode_sequence(trans_decoded, target_decoded_length, target_decoded_seq_len,
+                                                                                   trans_decoded, target_decoded_length, target_decoded_seq_len)
+            
             # recon_decoded: (batch_size * target_seq_len, decoder_depth)
             recon_decoded = mx.sym.reshape(data=recon_decoded, shape=(-3, 0))
 
@@ -492,10 +495,10 @@ class UnsupervisedTrainingModel(SockeyeModel):
             # language model loss
             target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
             language_decoded = mx.sym.reshape(data=language_decoded, shape=(-3, 0))
-            loss_distance = self.dissimilarity_loss.get_loss(target_decoded, language_decoded)
+            loss_distance = loss.compute_dissimilarity_loss(target_decoded, language_decoded, weight=self._alpha)
 
-            loss = self._alpha * mx.sym.Group(loss_reconstruction) + mx.sym.Group(loss_distance)
-            return loss, data_names, label_names
+            loss_distance.extend(loss_reconstruction)
+            return mx.sym.Group(loss_distance), data_names, label_names
 
         if self.config.lhuc:
             arguments = sym_gen(default_bucket_key)[0].list_arguments()
@@ -533,187 +536,6 @@ class UnsupervisedTrainingModel(SockeyeModel):
 
         self.save_version(self.output_dir)
         self.save_config(self.output_dir)
-
-    def run_forward_backward(self, batch: mx.io.DataBatch, metric: mx.metric.EvalMetric):
-        """
-        Runs forward/backward pass and updates training metric(s).
-        """
-        self.module.forward_backward(batch)
-        self.module.update_metric(metric, batch.label)
-
-    def update(self):
-        """
-        Updates parameters of the module.
-        """
-        self.module.update()
-
-    def get_gradients(self) -> Dict[str, List[mx.nd.NDArray]]:
-        """
-        Returns a mapping of parameters to gradient arrays, summed across devices.
-        """
-        return {name: mx.nd.add_n(*(exe.grad_arrays[i] for exe in self.executors)) for i, name in
-                enumerate(self.executor_group.arg_names)
-                if name in self.executor_group.param_names and self.executors[0].grad_arrays[i] is not None}
-                # We may have None if not all parameters are optimized
-
-    def get_global_gradient_norm(self) -> float:
-        """
-        Returns global gradient norm.
-        """
-        # average norm across executors:
-        exec_norms = [global_norm([arr for arr in exe.grad_arrays if arr is not None]) for exe in self.executors]
-        norm_val = sum(exec_norms) / float(len(exec_norms))
-        norm_val *= self.optimizer.rescale_grad
-        return norm_val
-
-    def rescale_gradients(self, scale: float):
-        """
-        Rescales gradient arrays of executors by scale.
-        """
-        for exe in self.executors:
-            for arr in exe.grad_arrays:
-                if arr is None:
-                    continue
-                arr *= scale
-
-    def prepare_batch(self, batch: mx.io.DataBatch):
-        """
-        Pre-fetches the next mini-batch.
-
-        :param batch: The mini-batch to prepare.
-        """
-        self.module.prepare(batch)
-
-    def evaluate(self, eval_iter: data_io.BaseParallelSampleIter, eval_metric: mx.metric.EvalMetric):
-        """
-        Resets and recomputes evaluation metric on given data iterator.
-        """
-        for eval_batch in eval_iter:
-            self.module.forward(eval_batch, is_train=False)
-            self.module.update_metric(eval_metric, eval_batch.label)
-
-    @property
-    def current_module(self) -> mx.module.Module:
-        # As the BucketingModule does not expose all methods of the underlying Module we need to directly access
-        # the currently active module, when we use bucketing.
-        return self.module._curr_module if self._bucketing else self.module
-
-    @property
-    def executor_group(self):
-        return self.current_module._exec_group
-
-    @property
-    def executors(self):
-        return self.executor_group.execs
-
-    @property
-    def loss(self):
-        return self.model_loss
-
-    @property
-    def optimizer(self) -> Union[mx.optimizer.Optimizer, SockeyeOptimizer]:
-        """
-        Returns the optimizer of the underlying module.
-        """
-        # TODO: Push update to MXNet to expose the optimizer (Module should have a get_optimizer method)
-        return self.current_module._optimizer
-
-    def initialize_optimizer(self, config: OptimizerConfig):
-        """
-        Initializes the optimizer of the underlying module with an optimizer config.
-        """
-        self.module.init_optimizer(kvstore=config.kvstore,
-                                   optimizer=config.name,
-                                   optimizer_params=config.params,
-                                   force_init=True)  # force init for training resumption use case
-
-    def save_optimizer_states(self, fname: str):
-        """
-        Saves optimizer states to a file.
-
-        :param fname: File name to save optimizer states to.
-        """
-        self.current_module.save_optimizer_states(fname)
-
-    def load_optimizer_states(self, fname: str):
-        """
-        Loads optimizer states from file.
-
-        :param fname: File name to load optimizer states from.
-        """
-        self.current_module.load_optimizer_states(fname)
-
-    def initialize_parameters(self, initializer: mx.init.Initializer, allow_missing_params: bool):
-        """
-        Initializes the parameters of the underlying module.
-
-        :param initializer: Parameter initializer.
-        :param allow_missing_params: Whether to allow missing parameters.
-        """
-        self.module.init_params(initializer=initializer,
-                                arg_params=self.params,
-                                aux_params=self.aux_params,
-                                allow_missing=allow_missing_params,
-                                force_init=False)
-
-    def log_parameters(self):
-        """
-        Logs information about model parameters.
-        """
-        arg_params, aux_params = self.module.get_params()
-        total_parameters = 0
-        info = []  # type: List[str]
-        for name, array in sorted(arg_params.items()):
-            info.append("%s: %s" % (name, array.shape))
-            total_parameters += reduce(lambda x, y: x * y, array.shape)
-        logger.info("Model parameters: %s", ", ".join(info))
-        if self.fixed_param_names:
-            logger.info("Fixed model parameters: %s", ", ".join(self.fixed_param_names))
-        logger.info("Total # of parameters: %d", total_parameters)
-
-    def save_params_to_file(self, fname: str):
-        """
-        Synchronizes parameters across devices, saves the parameters to disk, and updates self.params
-        and self.aux_params.
-
-        :param fname: Filename to write parameters to.
-        """
-        arg_params, aux_params = self.module.get_params()
-        self.module.set_params(arg_params, aux_params)
-        self.params = arg_params
-        self.aux_params = aux_params
-        super().save_params_to_file(fname)
-
-    def load_params_from_file(self, fname: str, allow_missing_params: bool = False):
-        """
-        Loads parameters from a file and sets the parameters of the underlying module and this model instance.
-
-        :param fname: File name to load parameters from.
-        :param allow_missing_params: If set, the given parameters are allowed to be a subset of the Module parameters.
-        """
-        super().load_params_from_file(fname)  # sets self.params & self.aux_params
-        self.module.set_params(arg_params=self.params,
-                               aux_params=self.aux_params,
-                               allow_missing=allow_missing_params)
-
-    def install_monitor(self, monitor_pattern: str, monitor_stat_func_name: str):
-        """
-        Installs an MXNet monitor onto the underlying module.
-
-        :param monitor_pattern: Pattern string.
-        :param monitor_stat_func_name: Name of monitor statistics function.
-        """
-        self._monitor = mx.monitor.Monitor(interval=C.MEASURE_SPEED_EVERY,
-                                           stat_func=C.MONITOR_STAT_FUNCS.get(monitor_stat_func_name),
-                                           pattern=monitor_pattern,
-                                           sort=True)
-        self.module.install_monitor(self._monitor)
-        logger.info("Installed MXNet monitor; pattern='%s'; statistics_func='%s'",
-                    monitor_pattern, monitor_stat_func_name)
-
-    @property
-    def monitor(self) -> Optional[mx.monitor.Monitor]:
-        return self._monitor
 
 
 def global_norm(ndarrays: List[mx.nd.NDArray]) -> float:
