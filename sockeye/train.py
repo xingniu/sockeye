@@ -729,7 +729,12 @@ def create_model_config(args: argparse.Namespace,
 
     if args.language_model:
         config_encoder, config_decoder = create_language_model_config(args)
-    elif args.unsupervised_training:
+    elif args.bidirectional_autoencoder:
+        config_encoder, encoder_num_hidden = create_encoder_config(args, config_conv)
+        config_decoder = create_self_decoder_config(args, encoder_num_hidden)
+        config_reconstruction_decoder = create_decoder_config(args, encoder_num_hidden)
+        _, config_language_model = create_language_model_config(args)
+    elif args.autoencoder_training:
         config_encoder, encoder_num_hidden = create_encoder_config(args, config_conv)
         config_decoder = create_self_decoder_config(args, encoder_num_hidden)
         config_reconstruction_encoder, recon_enc_num_hidden = create_encoder_config(args, config_conv)
@@ -792,26 +797,36 @@ def create_training_model(config: model.ModelConfig,
     :param args: Arguments as returned by argparse.
     :return: The training model.
     """
-    if args.unsupervised_training:
-        training_model = training.UnsupervisedTrainingModel(config=config,
-                                                            context=context,
-                                                            output_dir=output_dir,
-                                                            provide_data=train_iter.provide_data,
-                                                            provide_label=train_iter.provide_label,
-                                                            default_bucket_key=train_iter.default_bucket_key,
-                                                            bucketing=not args.no_bucketing,
-                                                            gradient_compression_params=gradient_compression_params(args),
-                                                            fixed_param_names=args.fixed_param_names)
+    if args.bidirectional_autoencoder:
+        training_model = training.BidirectionalAutoencoderTrainingModel(config=config,
+                                                                        context=context,
+                                                                        output_dir=output_dir,
+                                                                        provide_data=train_iter.provide_data,
+                                                                        provide_label=train_iter.provide_label,
+                                                                        default_bucket_key=train_iter.default_bucket_key,
+                                                                        bucketing=not args.no_bucketing,
+                                                                        gradient_compression_params=gradient_compression_params(args),
+                                                                        fixed_param_names=args.fixed_param_names)
+    elif args.autoencoder_training:
+        training_model = training.AutoencoderTrainingModel(config=config,
+                                                           context=context,
+                                                           output_dir=output_dir,
+                                                           provide_data=train_iter.provide_data,
+                                                           provide_label=train_iter.provide_label,
+                                                           default_bucket_key=train_iter.default_bucket_key,
+                                                           bucketing=not args.no_bucketing,
+                                                           gradient_compression_params=gradient_compression_params(args),
+                                                           fixed_param_names=args.fixed_param_names)
     else:
-        training_model = training.TrainingModel(config=config,
-                                                context=context,
-                                                output_dir=output_dir,
-                                                provide_data=train_iter.provide_data,
-                                                provide_label=train_iter.provide_label,
-                                                default_bucket_key=train_iter.default_bucket_key,
-                                                bucketing=not args.no_bucketing,
-                                                gradient_compression_params=gradient_compression_params(args),
-                                                fixed_param_names=args.fixed_param_names)
+        training_model = training.StandardTrainingModel(config=config,
+                                                        context=context,
+                                                        output_dir=output_dir,
+                                                        provide_data=train_iter.provide_data,
+                                                        provide_label=train_iter.provide_label,
+                                                        default_bucket_key=train_iter.default_bucket_key,
+                                                        bucketing=not args.no_bucketing,
+                                                        gradient_compression_params=gradient_compression_params(args),
+                                                        fixed_param_names=args.fixed_param_names)
 
     return training_model
 

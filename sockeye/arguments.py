@@ -665,14 +665,18 @@ def add_training_args(params):
                               action='store_true',
                               help='Train a language model instead of a NMT system. Default: %(default)s.')
 
-    train_params.add_argument('--unsupervised-training',
+    train_params.add_argument('--autoencoder-training',
                               action='store_true',
                               help='Use only monolingual corpora for training. Default: %(default)s.')
+
+    train_params.add_argument('--bidirectional-autoencoder',
+                              action='store_true',
+                              help='Tie primal and dual models together. Default: %(default)s.')
 
     train_params.add_argument('--weight-language-model-loss',
                               type=float,
                               default=1.0,
-                              help='Weight for language model loss during unsupervised training. Default: %(default)s.')
+                              help='Weight for language model loss in autoencoder training model. Default: %(default)s.')
 
     train_params.add_argument('--batch-size', '-b',
                               type=int_greater_or_equal(1),

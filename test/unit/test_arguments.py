@@ -124,7 +124,8 @@ def test_model_parameters(test_params, expected_params):
 
 @pytest.mark.parametrize("test_params, expected_params", [
     ('', dict(language_model=False,
-              unsupervised_training=False,
+              autoencoder_training=False,
+              bidirectional_autoencoder=False,
               weight_language_model_loss=1.0,
               batch_size=64,
               batch_type="sentence",

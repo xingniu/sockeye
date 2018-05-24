@@ -42,7 +42,7 @@ from .optimizers import BatchState, CheckpointState, SockeyeOptimizer, Optimizer
 
 logger = logging.getLogger(__name__)
 
-class TrainingModelBase(model.SockeyeModel):
+class TrainingModel(model.SockeyeModel):
     def __init__(self, config: model.ModelConfig, prefix: str = '') -> None:
         super().__init__(config)
 
@@ -228,9 +228,9 @@ class TrainingModelBase(model.SockeyeModel):
         return self._monitor
 
 
-class TrainingModel(TrainingModelBase):
+class StandardTrainingModel(TrainingModel):
     """
-    TrainingModel is a SockeyeModel that fully unrolls over source and target sequences.
+    StandardTrainingModel is a TrainingModel that fully unrolls over source and target sequences.
 
     :param config: Configuration object holding details about the model.
     :param context: The context(s) that MXNet will be run in (GPU(s)/CPU).
@@ -369,9 +369,9 @@ class TrainingModel(TrainingModelBase):
         self.save_version(self.output_dir)
         self.save_config(self.output_dir)
 
-class UnsupervisedTrainingModel(TrainingModelBase):
+class AutoencoderTrainingModel(TrainingModel):
     """
-    UnsupervisedTrainingModel is a SockeyeModel that uses only monolingual data.
+    AutoencoderTrainingModel is a TrainingModel that uses only monolingual data.
 
     :param config: Configuration object holding details about the model.
     :param context: The context(s) that MXNet will be run in (GPU(s)/CPU).
@@ -469,6 +469,177 @@ class UnsupervisedTrainingModel(TrainingModelBase):
                                                                     None, None, target_embed_seq_len)
             
             # reconstructor
+            # recon_decoded: (batch_size, target_len, decoder_depth)
+            # target must be the same as source input
+            (recon_encoded,
+             recon_encoded_length,
+             recon_encoded_seq_len) = self.reconstruction_encoder.encode(target_decoded, target_decoded_length, target_decoded_seq_len)
+            (recon_decoded, _, _) = self.reconstruction_decoder.decode_sequence(recon_encoded, recon_encoded_length, recon_encoded_seq_len,
+                                                                                target_embed, target_embed_length, target_embed_seq_len)
+            
+            # language model decoder
+            # language_decoded: (batch_size, target_decoded_length, decoder_depth)
+            trans_decoded = mx.sym.slice_axis(mx.sym.concat(mx.sym.slice_axis(target_embed, axis=1, begin=0, end=1), target_decoded, dim=1), axis=1, begin=0, end=target_decoded_seq_len)
+            (language_decoded, _, _) = self.language_model_decoder.decode_sequence(trans_decoded, target_decoded_length, target_decoded_seq_len,
+                                                                                   trans_decoded, target_decoded_length, target_decoded_seq_len)
+            
+            # recon_decoded: (batch_size * target_seq_len, decoder_depth)
+            recon_decoded = mx.sym.reshape(data=recon_decoded, shape=(-3, 0))
+
+            # output layer
+            # logits: (batch_size * target_seq_len, target_vocab_size)
+            logits = self.output_layer(recon_decoded)
+
+            loss_reconstruction = self.model_loss.get_loss(logits, labels)
+
+            # language model loss
+            target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
+            language_decoded = mx.sym.reshape(data=language_decoded, shape=(-3, 0))
+            loss_distance = loss.compute_dissimilarity_loss(target_decoded, language_decoded, weight=self._alpha)
+
+            loss_distance.extend(loss_reconstruction)
+            return mx.sym.Group(loss_distance), data_names, label_names
+
+        if self.config.lhuc:
+            arguments = sym_gen(default_bucket_key)[0].list_arguments()
+            fixed_param_names = [a for a in arguments if not a.endswith(C.LHUC_NAME)]
+        else:
+            fixed_param_names = self.fixed_param_names
+
+        if self._bucketing:
+            logger.info("Using bucketing. Default max_seq_len=%s", default_bucket_key)
+            self.module = mx.mod.BucketingModule(sym_gen=sym_gen,
+                                                 logger=logger,
+                                                 default_bucket_key=default_bucket_key,
+                                                 context=self.context,
+                                                 compression_params=self._gradient_compression_params,
+                                                 fixed_param_names=fixed_param_names)
+        else:
+            logger.info("No bucketing. Unrolled to (%d,%d)",
+                        self.config.config_data.max_seq_len_source, self.config.config_data.max_seq_len_target)
+            symbol, _, __ = sym_gen(default_bucket_key)
+            self.module = mx.mod.Module(symbol=symbol,
+                                        data_names=data_names,
+                                        label_names=label_names,
+                                        logger=logger,
+                                        context=self.context,
+                                        compression_params=self._gradient_compression_params,
+                                        fixed_param_names=fixed_param_names)
+
+        self.module.bind(data_shapes=provide_data,
+                         label_shapes=provide_label,
+                         for_training=True,
+                         force_rebind=True,
+                         grad_req='write')
+
+        self.module.symbol.save(os.path.join(self.output_dir, C.SYMBOL_NAME))
+
+        self.save_version(self.output_dir)
+        self.save_config(self.output_dir)
+
+
+class BidirectionalAutoencoderTrainingModel(TrainingModel):
+    """
+    BidirectionalAutoencoderTrainingModel is a TrainingModel that is similar to AutoencoderTrainingModel
+    but ties primal and dual models together.
+
+    :param config: Configuration object holding details about the model.
+    :param context: The context(s) that MXNet will be run in (GPU(s)/CPU).
+    :param output_dir: Directory where this model is stored.
+    :param provide_data: List of input data descriptions.
+    :param provide_label: List of label descriptions.
+    :param default_bucket_key: Default bucket key.
+    :param bucketing: If True bucketing will be used, if False the computation graph will always be
+            unrolled to the full length.
+    :param gradient_compression_params: Optional dictionary of gradient compression parameters.
+    :param fixed_param_names: Optional list of params to fix during training (i.e. their values will not be trained).
+    """
+
+    def __init__(self,
+                 config: model.ModelConfig,
+                 context: List[mx.context.Context],
+                 output_dir: str,
+                 provide_data: List[mx.io.DataDesc],
+                 provide_label: List[mx.io.DataDesc],
+                 default_bucket_key: Tuple[int, int],
+                 bucketing: bool,
+                 gradient_compression_params: Optional[Dict[str, Any]] = None,
+                 fixed_param_names: Optional[List[str]] = None) -> None:
+        super().__init__(config)
+        self.context = context
+        self.output_dir = output_dir
+        self.fixed_param_names = fixed_param_names
+        self._bucketing = bucketing
+        self._alpha = config.weight_language_model_loss
+        self._gradient_compression_params = gradient_compression_params
+        self._initialize(provide_data, provide_label, default_bucket_key)
+        self._monitor = None  # type: Optional[mx.monitor.Monitor]
+
+    def _initialize(self,
+                    provide_data: List[mx.io.DataDesc],
+                    provide_label: List[mx.io.DataDesc],
+                    default_bucket_key: Tuple[int, int]):
+        """
+        Initializes model components, creates training symbol and module, and binds it.
+        """
+        source = mx.sym.Variable(C.SOURCE_NAME)
+        source_words = source.split(num_outputs=self.config.config_embed_source.num_factors,
+                                    axis=2, squeeze_axis=True)[0]
+        source_length = utils.compute_lengths(source_words)
+        target = mx.sym.Variable(C.TARGET_NAME)
+        target_length = utils.compute_lengths(target)
+        labels = mx.sym.reshape(data=mx.sym.Variable(C.TARGET_LABEL_NAME), shape=(-1,))
+
+        # constructor and language model
+        self.reconstruction_encoder = self.encoder
+        self.reconstruction_decoder = decoder.get_decoder(self.config.config_reconstruction_decoder, prefix=self.prefix+'dual')
+        self.reconstruction_decoder.__dict__.update(self.decoder.__dict__)
+        self.language_model_decoder = decoder.get_decoder(self.config.config_language_model, prefix=self.prefix+'language')
+
+        self.model_loss = loss.get_loss(self.config.config_loss)
+
+        data_names = [C.SOURCE_NAME, C.TARGET_NAME]
+        label_names = [C.TARGET_LABEL_NAME]
+
+        # check provide_{data,label} names
+        provide_data_names = [d[0] for d in provide_data]
+        utils.check_condition(provide_data_names == data_names,
+                              "incompatible provide_data: %s, names should be %s" % (provide_data_names, data_names))
+        provide_label_names = [d[0] for d in provide_label]
+        utils.check_condition(provide_label_names == label_names,
+                              "incompatible provide_label: %s, names should be %s" % (provide_label_names, label_names))
+
+        def sym_gen(seq_lens):
+            """
+            Returns a (grouped) loss symbol given source & target input lengths.
+            Also returns data and label names for the BucketingModule.
+            """
+            source_seq_len, target_seq_len = seq_lens
+
+            # source embedding
+            (source_embed,
+             source_embed_length,
+             source_embed_seq_len) = self.embedding_source.encode(source, source_length, source_seq_len)
+
+            # target embedding
+            (target_embed,
+             target_embed_length,
+             target_embed_seq_len) = self.embedding_target.encode(target, target_length, target_seq_len)
+
+            # encoder
+            # source_encoded: (batch_size, source_encoded_length, encoder_depth)
+            (source_encoded,
+             source_encoded_length,
+             source_encoded_seq_len) = self.encoder.encode(source_embed, source_embed_length, source_embed_seq_len)
+
+            # decoder
+            # target_decoded: (batch-size, target_len, decoder_depth)
+            (target_decoded,
+             target_decoded_length,
+             target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded, source_encoded_length, source_encoded_seq_len,
+                                                                    None, None, target_embed_seq_len)
+            
+            # reconstructor reuses the primal encoder-decoder model
             # recon_decoded: (batch_size, target_len, decoder_depth)
             # target must be the same as source input
             (recon_encoded,
