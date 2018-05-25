@@ -53,6 +53,7 @@ class CheckpointDecoder:
     :param ensemble_mode: Ensemble mode: linear or log_linear combination.
     :param sample_size: Maximum number of sentences to sample and decode. If <=0, all sentences are used.
     :param random_seed: Random seed for sampling. Default: 42.
+    :param language_model: If True, querying instead of translation.
     """
 
     def __init__(self,
@@ -70,12 +71,14 @@ class CheckpointDecoder:
                  max_output_length_num_stds: int = C.DEFAULT_NUM_STD_MAX_OUTPUT_LENGTH,
                  ensemble_mode: str = 'linear',
                  sample_size: int = -1,
-                 random_seed: int = 42) -> None:
+                 random_seed: int = 42,
+                 language_model: bool = False) -> None:
         self.context = context
         self.max_input_len = max_input_len
         self.max_output_length_num_stds = max_output_length_num_stds
         self.ensemble_mode = ensemble_mode
-        self.beam_size = beam_size
+        self.language_model = language_model
+        self.beam_size = 1 if language_model else beam_size
         self.batch_size = batch_size
         self.bucket_width_source = bucket_width_source
         self.length_penalty_alpha = length_penalty_alpha
@@ -143,11 +146,14 @@ class CheckpointDecoder:
                                           source_vocabs=source_vocabs,
                                           target_vocab=target_vocab,
                                           restrict_lexicon=None,
-                                          store_beam=False)
+                                          store_beam=False,
+                                          language_model=self.language_model)
         trans_wall_time = 0.0
         translations = []
+        scores = []
         with data_io.smart_open(output_name, 'w') as output:
-            handler = sockeye.output_handler.StringOutputHandler(output)
+            handler = sockeye.output_handler.StringWithScoreOutputHandler(output) if self.language_model else \
+                      sockeye.output_handler.StringOutputHandler(output)
             tic = time.time()
             trans_inputs = []  # type: List[inference.TranslatorInput]
             for i, inputs in enumerate(self.inputs_sentences):
@@ -157,6 +163,7 @@ class CheckpointDecoder:
             for trans_input, trans_output in zip(trans_inputs, trans_outputs):
                 handler.handle(trans_input, trans_output)
                 translations.append(trans_output.translation)
+                scores.append(trans_output.score)
         avg_time = trans_wall_time / len(self.target_sentences)
 
         # TODO(fhieber): eventually add more metrics (METEOR etc.)
@@ -165,6 +172,7 @@ class CheckpointDecoder:
                                                      offset=0.01),
                 C.CHRF_VAL: evaluate.raw_corpus_chrf(hypotheses=translations,
                                                      references=self.target_sentences),
+                C.SCORE_VAL: evaluate.raw_corpus_score(scores=scores),
                 C.AVG_TIME: avg_time,
                 C.DECODING_TIME: trans_wall_time}
 

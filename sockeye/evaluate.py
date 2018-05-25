@@ -55,6 +55,16 @@ def raw_corpus_chrf(hypotheses: Iterable[str], references: Iterable[str]) -> flo
                                  remove_whitespace=True)
 
 
+def raw_corpus_score(scores: Iterable[float]) -> float:
+    """
+    Calculate averaged exp(translation_score).
+
+    :param scores: Scores stream.
+    :return: Average score as float.
+    """
+    return np.exp(np.mean(scores))
+
+
 def main():
     params = argparse.ArgumentParser(description='Evaluate translations by calculating metrics with '
                                                  'respect to a reference set. If multiple hypotheses files are given'

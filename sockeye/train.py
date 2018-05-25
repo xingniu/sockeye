@@ -227,7 +227,8 @@ def create_checkpoint_decoder(args: argparse.Namespace,
                                                 inputs=[args.validation_source] + args.validation_source_factors,
                                                 references=args.validation_target,
                                                 model=args.output,
-                                                sample_size=sample_size)
+                                                sample_size=sample_size,
+                                                language_model=args.language_model)
 
 
 def use_shared_vocab(args: argparse.Namespace) -> bool:
@@ -239,10 +240,15 @@ def use_shared_vocab(args: argparse.Namespace) -> bool:
     weight_tying = args.weight_tying
     weight_tying_type = args.weight_tying_type
     shared_vocab = args.shared_vocab
+    language_model = args.language_model
     if weight_tying and C.WEIGHT_TYING_SRC in weight_tying_type and C.WEIGHT_TYING_TRG in weight_tying_type:
         if not shared_vocab:
             logger.info("A shared source/target vocabulary will be used as weight tying source/target weight tying "
                         "is enabled")
+        shared_vocab = True
+    if language_model:
+        if not shared_vocab:
+            logger.info("A shared source/target vocabulary will be used for language modeling.")
         shared_vocab = True
     return shared_vocab
 
@@ -552,13 +558,13 @@ def create_language_model_config(args: argparse.Namespace) -> Tuple[encoder.Enco
     """
     _, decoder_num_layers = args.num_layers
     max_seq_len_source, max_seq_len_target = args.max_seq_len
-    _, num_embed_target = args.num_embed
+    num_embed_source, num_embed_target = args.num_embed
     config_encoder = None  # type: Optional[Config]
     config_decoder = None  # type: Optional[Config]
 
     if args.decoder == C.TRANSFORMER_TYPE:
         config_encoder = encoder.EmptyEncoderConfig(
-            num_hidden=args.rnn_num_hidden)
+            num_hidden=num_embed_source)
 
         _, decoder_transformer_preprocess = args.transformer_preprocess
         _, decoder_transformer_postprocess = args.transformer_postprocess
@@ -580,7 +586,7 @@ def create_language_model_config(args: argparse.Namespace) -> Tuple[encoder.Enco
         raise NotImplementedError()
     else:
         config_encoder = encoder.EmptyEncoderConfig(
-            num_hidden=args.rnn_num_hidden)
+            num_hidden=num_embed_source)
 
         _, decoder_rnn_dropout_inputs = args.rnn_dropout_inputs
         _, decoder_rnn_dropout_states = args.rnn_dropout_states
