@@ -115,6 +115,21 @@ def test_att_fixed():
     assert attention._input_previous_word
 
 
+def test_att_zero():
+    config_attention = sockeye.rnn_attention.AttentionConfig(type=C.ATT_ZERO,
+                                                             num_hidden=None,
+                                                             input_previous_word=True,
+                                                             source_num_hidden=None,
+                                                             query_num_hidden=None,
+                                                             layer_normalization=False,
+                                                             config_coverage=None)
+
+    attention = sockeye.rnn_attention.get_attention(config_attention, max_seq_len=None)
+
+    assert type(attention) == sockeye.rnn_attention.EmptyAttention
+    assert attention._input_previous_word
+
+
 def test_att_loc():
     config_attention = sockeye.rnn_attention.AttentionConfig(type=C.ATT_LOC,
                                                              num_hidden=None,

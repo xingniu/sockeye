@@ -118,10 +118,11 @@ ATT_BILINEAR = 'bilinear'
 ATT_DOT = 'dot'
 ATT_MH_DOT = 'mhdot'
 ATT_FIXED = 'fixed'
+ATT_ZERO = 'zero'
 ATT_LOC = 'location'
 ATT_MLP = 'mlp'
 ATT_COV = "coverage"
-ATT_TYPES = [ATT_BILINEAR, ATT_DOT, ATT_MH_DOT, ATT_FIXED, ATT_LOC, ATT_MLP, ATT_COV]
+ATT_TYPES = [ATT_BILINEAR, ATT_DOT, ATT_MH_DOT, ATT_FIXED, ATT_ZERO, ATT_LOC, ATT_MLP, ATT_COV]
 
 # weight tying components
 WEIGHT_TYING_SRC = 'src'

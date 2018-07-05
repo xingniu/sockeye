@@ -527,6 +527,36 @@ class EncoderLastStateAttention(Attention):
         return attend
 
 
+@Attention.register(C.ATT_ZERO)
+class EmptyAttention(Attention):
+    """
+    Always returns zero values.
+    """
+
+    def on(self, source: mx.sym.Symbol, source_length: mx.sym.Symbol, source_seq_len: int) -> Callable:
+        """
+        Returns callable to be used for recurrent attention in a sequence decoder.
+        The callable is a recurrent function of the form:
+        AttentionState = attend(AttentionInput, AttentionState).
+
+        :param source: Shape: (batch_size, seq_len, encoder_num_hidden).
+        :param source_length: Shape: (batch_size,).
+        :param source_seq_len: Maximum length of source sequences.
+        :return: Attention callable.
+        """
+        encoder_last_state = mx.sym.SequenceLast(data=source, axis=1, sequence_length=source_length,
+                                                 use_sequence_length=True)
+        zero_context = mx.sym.zeros_like(encoder_last_state)
+        fixed_probs = mx.sym.one_hot(source_length - 1, depth=source_seq_len)
+
+        def attend(att_input: AttentionInput, att_state: AttentionState) -> AttentionState:
+            return AttentionState(context=zero_context,
+                                  probs=fixed_probs,
+                                  dynamic_source=att_state.dynamic_source)
+
+        return attend
+
+
 @Attention.register(C.ATT_LOC)
 class LocationAttention(Attention):
     """
