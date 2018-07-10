@@ -682,6 +682,7 @@ def create_model_config(args: argparse.Namespace,
                                      weight_tying=args.weight_tying,
                                      weight_tying_type=args.weight_tying_type if args.weight_tying else None,
                                      weight_normalization=args.weight_normalization,
+                                     output_layer_no_bias=args.output_layer_no_bias,
                                      lhuc=args.lhuc is not None)
     return model_config
 

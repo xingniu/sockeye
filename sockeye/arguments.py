@@ -726,6 +726,8 @@ def add_model_parameters(params):
     model_params.add_argument('--weight-normalization', action="store_true",
                               help="Adds weight normalization to decoder output layers "
                                    "(and all convolutional weight matrices for CNN decoders). Default: %(default)s.")
+    model_params.add_argument('--output-layer-no-bias', action="store_true",
+                              help="Ignores the bias in decoder output layers. Default: %(default)s.")
 
 
 def add_training_args(params):

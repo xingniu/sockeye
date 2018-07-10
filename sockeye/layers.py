@@ -167,6 +167,7 @@ class OutputLayer:
     :param hidden_size: Decoder hidden size.
     :param vocab_size: Target vocabulary size.
     :param weight_normalization: Whether to apply weight normalization.
+    :param no_bias: Ignore the bias term.
     :param prefix: Prefix used for naming.
     """
 
@@ -175,9 +176,11 @@ class OutputLayer:
                  vocab_size: int,
                  weight: Optional[mx.sym.Symbol],
                  weight_normalization: bool,
+                 no_bias: bool = False,
                  prefix: str = C.DEFAULT_OUTPUT_LAYER_PREFIX) -> None:
         self.vocab_size = vocab_size
         self.prefix = prefix
+        self.no_bias = no_bias
 
         if weight is None:
             self.w = mx.sym.Variable("%sweight" % self.prefix, shape=(vocab_size, hidden_size))
@@ -193,7 +196,8 @@ class OutputLayer:
                                                    prefix=self.prefix)
             self.w = self.weight_norm()
 
-        self.b = mx.sym.Variable("%sbias" % self.prefix)
+        if not no_bias:
+            self.b = mx.sym.Variable("%sbias" % self.prefix)
 
     def __call__(self,
                  hidden: Union[mx.sym.Symbol, mx.nd.NDArray],
@@ -207,12 +211,20 @@ class OutputLayer:
         """
         if isinstance(hidden, mx.sym.Symbol):
             # TODO dropout?
-            return mx.sym.FullyConnected(data=hidden,
-                                         num_hidden=self.vocab_size,
-                                         weight=self.w,
-                                         bias=self.b,
-                                         flatten=False,
-                                         name=C.LOGITS_NAME)
+            if self.no_bias:
+                return mx.sym.FullyConnected(data=hidden,
+                                             num_hidden=self.vocab_size,
+                                             weight=self.w,
+                                             no_bias=True,
+                                             flatten=False,
+                                             name=C.LOGITS_NAME)
+            else:
+                return mx.sym.FullyConnected(data=hidden,
+                                             num_hidden=self.vocab_size,
+                                             weight=self.w,
+                                             bias=self.b,
+                                             flatten=False,
+                                             name=C.LOGITS_NAME)
 
         # Equivalent NDArray implementation (requires passed weights/biases)
         assert isinstance(hidden, mx.nd.NDArray)
