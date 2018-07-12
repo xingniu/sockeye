@@ -639,6 +639,7 @@ def create_model_config(args: argparse.Namespace,
                                                            pool_stride=args.conv_embed_pool_stride,
                                                            num_highway_layers=args.conv_embed_num_highway_layers,
                                                            dropout=args.conv_embed_dropout)
+
     if args.encoder == C.TRANSFORMER_WITH_CONV_EMBED_TYPE:
         config_conv = encoder.ConvolutionalEmbeddingConfig(num_embed=num_embed_source,
                                                            output_dim=num_embed_source,
@@ -683,6 +684,8 @@ def create_model_config(args: argparse.Namespace,
                                      weight_tying_type=args.weight_tying_type if args.weight_tying else None,
                                      weight_normalization=args.weight_normalization,
                                      output_layer_no_bias=args.output_layer_no_bias,
+                                     bidirectional_autoencoder=args.bidirectional_autoencoder,
+                                     weight_language_model=args.weight_language_model,
                                      lhuc=args.lhuc is not None)
     return model_config
 
@@ -702,15 +705,26 @@ def create_training_model(config: model.ModelConfig,
     :param args: Arguments as returned by argparse.
     :return: The training model.
     """
-    training_model = training.TrainingModel(config=config,
-                                            context=context,
-                                            output_dir=output_dir,
-                                            provide_data=train_iter.provide_data,
-                                            provide_label=train_iter.provide_label,
-                                            default_bucket_key=train_iter.default_bucket_key,
-                                            bucketing=not args.no_bucketing,
-                                            gradient_compression_params=gradient_compression_params(args),
-                                            fixed_param_names=args.fixed_param_names)
+    if args.autoencoder_training:
+        training_model = training.AutoencoderTrainingModel(config=config,
+                                                           context=context,
+                                                           output_dir=output_dir,
+                                                           provide_data=train_iter.provide_data,
+                                                           provide_label=train_iter.provide_label,
+                                                           default_bucket_key=train_iter.default_bucket_key,
+                                                           bucketing=not args.no_bucketing,
+                                                           gradient_compression_params=gradient_compression_params(args),
+                                                           fixed_param_names=args.fixed_param_names)
+    else:
+        training_model = training.StandardTrainingModel(config=config,
+                                                        context=context,
+                                                        output_dir=output_dir,
+                                                        provide_data=train_iter.provide_data,
+                                                        provide_label=train_iter.provide_label,
+                                                        default_bucket_key=train_iter.default_bucket_key,
+                                                        bucketing=not args.no_bucketing,
+                                                        gradient_compression_params=gradient_compression_params(args),
+                                                        fixed_param_names=args.fixed_param_names)
 
     return training_model
 

@@ -60,6 +60,23 @@ def get_loss(loss_config: LossConfig) -> 'Loss':
     else:
         raise ValueError("unknown loss name: %s" % loss_config.name)
 
+def compute_dissimilarity_loss(input_embeddings: mx.sym.Symbol, target_embeddings: mx.sym.Symbol, weight: float = 1.0) -> List[mx.sym.Symbol]:
+    """
+    Returns cosine distance between input and target embeddings.
+
+    :param input_embeddings: Shape: (batch_size * target_seq_len, target_embed_size).
+    :param target_embeddings: Shape: (batch_size * target_seq_len, target_embed_size).
+    :return: List of loss symbol.
+    """
+    # normalize embeddings
+    # input_embeddings = input_embeddings / mx.sym.norm(input_embeddings, axis=1)
+    # target_embeddings = target_embeddings / mx.sym.norm(target_embeddings, axis=1)
+
+    input_embeddings = mx.sym.expand_dims(input_embeddings, axis=1)
+    target_embeddings = mx.sym.expand_dims(target_embeddings, axis=2)
+    distance = mx.sym.batch_dot(input_embeddings, target_embeddings)
+    distance = mx.sym.reshape(distance, shape=(-1))
+    return [mx.sym.make_loss(mx.sym.log(mx.sym.exp(-distance) + 1) * weight)]
 
 class Loss(ABC):
     """

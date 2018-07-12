@@ -63,6 +63,8 @@ class ModelConfig(Config):
                  weight_tying_type: Optional[str] = C.WEIGHT_TYING_TRG_SOFTMAX,
                  weight_normalization: bool = False,
                  output_layer_no_bias: bool = False,
+                 bidirectional_autoencoder: bool = False,
+                 weight_language_model: float = 1.0,
                  lhuc: bool = False) -> None:
         super().__init__()
         self.config_data = config_data
@@ -77,6 +79,8 @@ class ModelConfig(Config):
         self.weight_tying_type = weight_tying_type
         self.weight_normalization = weight_normalization
         self.output_layer_no_bias = output_layer_no_bias
+        self.bidirectional_autoencoder = bidirectional_autoencoder,
+        self.weight_language_model = weight_language_model
         if weight_tying and weight_tying_type is None:
             raise RuntimeError("weight_tying_type must be specified when using weight_tying.")
         self.lhuc = lhuc
