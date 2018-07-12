@@ -58,8 +58,6 @@ class ModelConfig(Config):
                  config_embed_target: encoder.EmbeddingConfig,
                  config_encoder: encoder.EncoderConfig,
                  config_decoder: decoder.DecoderConfig,
-                 config_reconstruction_encoder: encoder.EncoderConfig,
-                 config_reconstruction_decoder: decoder.DecoderConfig,
                  config_language_model: decoder.DecoderConfig,
                  config_loss: loss.LossConfig,
                  weight_tying: bool = False,
@@ -75,8 +73,6 @@ class ModelConfig(Config):
         self.config_embed_target = config_embed_target
         self.config_encoder = config_encoder
         self.config_decoder = config_decoder
-        self.config_reconstruction_encoder = config_reconstruction_encoder
-        self.config_reconstruction_decoder = config_reconstruction_decoder
         self.config_language_model = config_language_model
         self.config_loss = config_loss
         self.weight_tying = weight_tying

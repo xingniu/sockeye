@@ -421,8 +421,8 @@ class AutoencoderTrainingModel(TrainingModel):
         labels = mx.sym.reshape(data=mx.sym.Variable(C.TARGET_LABEL_NAME), shape=(-1,))
 
         # reconstructor & language model
-        self.reconstruction_encoder = encoder.get_encoder(self.config.config_reconstruction_encoder, prefix=self.prefix+'dual')
-        self.reconstruction_decoder = decoder.get_decoder(self.config.config_reconstruction_decoder, prefix=self.prefix+'dual')
+        self.reconstruction_encoder = encoder.get_encoder(self.config.config_encoder, prefix=self.prefix+'dual')
+        self.reconstruction_decoder = decoder.get_decoder(self.config.config_decoder, prefix=self.prefix+'dual')
         self.language_model_decoder = decoder.get_decoder(self.config.config_language_model, prefix=self.prefix+'language')
 
         self.model_loss = loss.get_loss(self.config.config_loss)
@@ -462,11 +462,14 @@ class AutoencoderTrainingModel(TrainingModel):
              source_encoded_seq_len) = self.encoder.encode(source_embed, source_embed_length, source_embed_seq_len)
 
             # decoder
+            self.decoder.set_teacher_forcing(False)
             # target_decoded: (batch-size, target_len, decoder_depth)
             (target_decoded,
              target_decoded_length,
              target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded, source_encoded_length, source_encoded_seq_len,
                                                                     None, None, target_embed_seq_len)
+            # reset teacher forcing mode
+            self.decoder.set_teacher_forcing(True)
             
             # reconstructor
             # recon_decoded: (batch_size, target_len, decoder_depth)
@@ -592,8 +595,7 @@ class BidirectionalAutoencoderTrainingModel(TrainingModel):
 
         # constructor and language model
         self.reconstruction_encoder = self.encoder
-        self.reconstruction_decoder = decoder.get_decoder(self.config.config_reconstruction_decoder, prefix=self.prefix+'dual')
-        self.reconstruction_decoder.__dict__.update(self.decoder.__dict__)
+        self.reconstruction_decoder = self.decoder
         self.language_model_decoder = decoder.get_decoder(self.config.config_language_model, prefix=self.prefix+'language')
 
         self.model_loss = loss.get_loss(self.config.config_loss)
@@ -633,11 +635,14 @@ class BidirectionalAutoencoderTrainingModel(TrainingModel):
              source_encoded_seq_len) = self.encoder.encode(source_embed, source_embed_length, source_embed_seq_len)
 
             # decoder
+            self.decoder.set_teacher_forcing(False)
             # target_decoded: (batch-size, target_len, decoder_depth)
             (target_decoded,
              target_decoded_length,
              target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded, source_encoded_length, source_encoded_seq_len,
                                                                     None, None, target_embed_seq_len)
+            # reset teacher forcing mode
+            self.decoder.set_teacher_forcing(True)
             
             # reconstructor reuses the primal encoder-decoder model
             # recon_decoded: (batch_size, target_len, decoder_depth)

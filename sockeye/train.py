@@ -542,97 +542,6 @@ def create_decoder_config(args: argparse.Namespace, encoder_num_hidden: int) -> 
 
     return config_decoder
 
-def create_self_decoder_config(args: argparse.Namespace, encoder_num_hidden: int) -> decoder.DecoderConfig:
-    """
-    Create the config for the decoder.
-
-    :param args: Arguments as returned by argparse.
-    :param encoder_num_hidden: Number of hidden units of the Encoder.
-    :return: The config for the decoder.
-    """
-    _, decoder_num_layers = args.num_layers
-    max_seq_len_source, max_seq_len_target = args.max_seq_len
-    _, num_embed_target = args.num_embed
-
-    config_decoder = None  # type: Optional[Config]
-
-    if args.decoder == C.TRANSFORMER_TYPE:
-        _, decoder_transformer_preprocess = args.transformer_preprocess
-        _, decoder_transformer_postprocess = args.transformer_postprocess
-        config_decoder = transformer.TransformerConfig(
-            model_size=args.transformer_model_size,
-            attention_heads=args.transformer_attention_heads,
-            feed_forward_num_hidden=args.transformer_feed_forward_num_hidden,
-            act_type=args.transformer_activation_type,
-            num_layers=decoder_num_layers,
-            dropout_attention=args.transformer_dropout_attention,
-            dropout_act=args.transformer_dropout_act,
-            dropout_prepost=args.transformer_dropout_prepost,
-            positional_embedding_type=args.transformer_positional_embedding_type,
-            preprocess_sequence=decoder_transformer_preprocess,
-            postprocess_sequence=decoder_transformer_postprocess,
-            max_seq_len_source=max_seq_len_source,
-            max_seq_len_target=max_seq_len_target,
-            conv_config=None)
-
-    elif args.decoder == C.CONVOLUTION_TYPE:
-        _, cnn_kernel_width_decoder = args.cnn_kernel_width
-        convolution_config = convolution.ConvolutionConfig(kernel_width=cnn_kernel_width_decoder,
-                                                           num_hidden=args.cnn_num_hidden,
-                                                           act_type=args.cnn_activation_type,
-                                                           weight_normalization=args.weight_normalization)
-        config_decoder = decoder.ConvolutionalDecoderConfig(cnn_config=convolution_config,
-                                                            max_seq_len_target=max_seq_len_target,
-                                                            num_embed=num_embed_target,
-                                                            encoder_num_hidden=encoder_num_hidden,
-                                                            num_layers=decoder_num_layers,
-                                                            positional_embedding_type=args.cnn_positional_embedding_type,
-                                                            project_qkv=args.cnn_project_qkv,
-                                                            hidden_dropout=args.cnn_hidden_dropout)
-
-    else:
-        rnn_attention_num_hidden = args.rnn_num_hidden if args.rnn_attention_num_hidden is None else args.rnn_attention_num_hidden
-        config_coverage = None
-        if args.rnn_attention_type == C.ATT_COV:
-            config_coverage = coverage.CoverageConfig(type=args.rnn_attention_coverage_type,
-                                                      num_hidden=args.rnn_attention_coverage_num_hidden,
-                                                      layer_normalization=args.layer_normalization)
-        config_attention = rnn_attention.AttentionConfig(type=args.rnn_attention_type,
-                                                         num_hidden=rnn_attention_num_hidden,
-                                                         input_previous_word=args.rnn_attention_use_prev_word,
-                                                         source_num_hidden=encoder_num_hidden,
-                                                         query_num_hidden=args.rnn_num_hidden,
-                                                         layer_normalization=args.layer_normalization,
-                                                         config_coverage=config_coverage,
-                                                         num_heads=args.rnn_attention_mhdot_heads,
-                                                         is_scaled=args.rnn_scale_dot_attention)
-
-        _, decoder_rnn_dropout_inputs = args.rnn_dropout_inputs
-        _, decoder_rnn_dropout_states = args.rnn_dropout_states
-        _, decoder_rnn_dropout_recurrent = args.rnn_dropout_recurrent
-
-        config_decoder = decoder.RecurrentSelfDecoderConfig(
-            max_seq_len_source=max_seq_len_source,
-            rnn_config=rnn.RNNConfig(cell_type=args.rnn_cell_type,
-                                     num_hidden=args.rnn_num_hidden,
-                                     num_layers=decoder_num_layers,
-                                     dropout_inputs=decoder_rnn_dropout_inputs,
-                                     dropout_states=decoder_rnn_dropout_states,
-                                     dropout_recurrent=decoder_rnn_dropout_recurrent,
-                                     residual=args.rnn_residual_connections,
-                                     first_residual_layer=args.rnn_first_residual_layer,
-                                     forget_bias=args.rnn_forget_bias,
-                                     lhuc=args.lhuc is not None and (C.LHUC_DECODER in args.lhuc or C.LHUC_ALL in args.lhuc)),
-            attention_config=config_attention,
-            hidden_dropout=args.rnn_decoder_hidden_dropout,
-            state_init=args.rnn_decoder_state_init,
-            context_gating=args.rnn_context_gating,
-            layer_normalization=args.layer_normalization,
-            attention_in_upper_layers=args.rnn_attention_in_upper_layers,
-            state_init_lhuc=args.lhuc is not None and (C.LHUC_STATE_INIT in args.lhuc or C.LHUC_ALL in args.lhuc))
-
-    return config_decoder
-
 def create_language_model_config(args: argparse.Namespace) -> Tuple[encoder.EncoderConfig, decoder.DecoderConfig]:
     """
     Create the config for the language model.
@@ -731,14 +640,11 @@ def create_model_config(args: argparse.Namespace,
         config_encoder, config_decoder = create_language_model_config(args)
     elif args.bidirectional_autoencoder:
         config_encoder, encoder_num_hidden = create_encoder_config(args, config_conv)
-        config_decoder = create_self_decoder_config(args, encoder_num_hidden)
-        config_reconstruction_decoder = create_decoder_config(args, encoder_num_hidden)
+        config_decoder = create_decoder_config(args, encoder_num_hidden)
         _, config_language_model = create_language_model_config(args)
     elif args.autoencoder_training:
         config_encoder, encoder_num_hidden = create_encoder_config(args, config_conv)
-        config_decoder = create_self_decoder_config(args, encoder_num_hidden)
-        config_reconstruction_encoder, recon_enc_num_hidden = create_encoder_config(args, config_conv)
-        config_reconstruction_decoder = create_decoder_config(args, recon_enc_num_hidden)
+        config_decoder = create_decoder_config(args, encoder_num_hidden)
         _, config_language_model = create_language_model_config(args)
     else:
         config_encoder, encoder_num_hidden = create_encoder_config(args, config_conv)
@@ -770,8 +676,6 @@ def create_model_config(args: argparse.Namespace,
                                      config_embed_target=config_embed_target,
                                      config_encoder=config_encoder,
                                      config_decoder=config_decoder,
-                                     config_reconstruction_encoder=config_reconstruction_encoder,
-                                     config_reconstruction_decoder=config_reconstruction_decoder,
                                      config_language_model=config_language_model,
                                      config_loss=config_loss,
                                      weight_tying=args.weight_tying,
