@@ -684,7 +684,7 @@ def create_model_config(args: argparse.Namespace,
                                      weight_tying_type=args.weight_tying_type if args.weight_tying else None,
                                      weight_normalization=args.weight_normalization,
                                      output_layer_no_bias=args.output_layer_no_bias,
-                                     bidirectional_autoencoder=args.bidirectional_autoencoder,
+                                     autoencoder_training=args.autoencoder_training,
                                      weight_language_model=args.weight_language_model,
                                      lhuc=args.lhuc is not None)
     return model_config
@@ -705,26 +705,15 @@ def create_training_model(config: model.ModelConfig,
     :param args: Arguments as returned by argparse.
     :return: The training model.
     """
-    if args.autoencoder_training:
-        training_model = training.AutoencoderTrainingModel(config=config,
-                                                           context=context,
-                                                           output_dir=output_dir,
-                                                           provide_data=train_iter.provide_data,
-                                                           provide_label=train_iter.provide_label,
-                                                           default_bucket_key=train_iter.default_bucket_key,
-                                                           bucketing=not args.no_bucketing,
-                                                           gradient_compression_params=gradient_compression_params(args),
-                                                           fixed_param_names=args.fixed_param_names)
-    else:
-        training_model = training.StandardTrainingModel(config=config,
-                                                        context=context,
-                                                        output_dir=output_dir,
-                                                        provide_data=train_iter.provide_data,
-                                                        provide_label=train_iter.provide_label,
-                                                        default_bucket_key=train_iter.default_bucket_key,
-                                                        bucketing=not args.no_bucketing,
-                                                        gradient_compression_params=gradient_compression_params(args),
-                                                        fixed_param_names=args.fixed_param_names)
+    training_model = training.TrainingModel(config=config,
+                                            context=context,
+                                            output_dir=output_dir,
+                                            provide_data=train_iter.provide_data,
+                                            provide_label=train_iter.provide_label,
+                                            default_bucket_key=train_iter.default_bucket_key,
+                                            bucketing=not args.no_bucketing,
+                                            gradient_compression_params=gradient_compression_params(args),
+                                            fixed_param_names=args.fixed_param_names)
 
     return training_model
 

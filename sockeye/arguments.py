@@ -741,10 +741,6 @@ def add_training_args(params):
                               action='store_true',
                               help='Use only monolingual corpora for training. Default: %(default)s.')
 
-    train_params.add_argument('--bidirectional-autoencoder',
-                              action='store_true',
-                              help='Tie primal and dual models together. Default: %(default)s.')
-
     train_params.add_argument('--weight-language-model',
                               type=float,
                               default=1.0,
