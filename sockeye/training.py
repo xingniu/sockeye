@@ -42,7 +42,23 @@ from .optimizers import BatchState, CheckpointState, SockeyeOptimizer, Optimizer
 
 logger = logging.getLogger(__name__)
 
+
 class TrainingModel(model.SockeyeModel):
+    """
+    TrainingModel is a SockeyeModel that fully unrolls over source and target sequences.
+
+    :param config: Configuration object holding details about the model.
+    :param context: The context(s) that MXNet will be run in (GPU(s)/CPU).
+    :param output_dir: Directory where this model is stored.
+    :param provide_data: List of input data descriptions.
+    :param provide_label: List of label descriptions.
+    :param default_bucket_key: Default bucket key.
+    :param bucketing: If True bucketing will be used, if False the computation graph will always be
+            unrolled to the full length.
+    :param gradient_compression_params: Optional dictionary of gradient compression parameters.
+    :param fixed_param_names: Optional list of params to fix during training (i.e. their values will not be trained).
+    """
+
     def __init__(self,
                  config: model.ModelConfig,
                  context: List[mx.context.Context],
