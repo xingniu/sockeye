@@ -111,6 +111,13 @@ def check_arg_compatibility(args: argparse.Namespace):
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Decoder pre-training currently supports RNN decoders only.")
 
+    if args.reconstruction:
+        check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
+                        "Reconstruction training currently supports RNN decoders only.")
+        check_condition(args.rnn_num_hidden == args.num_embed[0],
+                        "Source embedding size must match RNN decoder size: %s vs. %s"
+                        % (args.rnn_num_hidden, args.num_embed[0]))
+
 
 def check_resume(args: argparse.Namespace, output_folder: str) -> bool:
     """
