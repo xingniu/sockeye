@@ -737,14 +737,15 @@ def add_training_args(params):
                                action='store_true',
                                help='Pre-train a decoder. This is currently for RNN decoders only. '
                                     'Default: %(default)s.')
-    train_params.add_argument('--autoencoder-training',
+    train_params.add_argument('--reconstruction',
                               action='store_true',
-                              help='Use only monolingual corpora for training. Default: %(default)s.')
-
-    train_params.add_argument('--weight-language-model',
+                              help='Fine-tune bidirectional NMT models by reconstructing monolingual data. '
+                                   'This is currently for RNN models only. Default: %(default)s.')
+    train_params.add_argument('--lm-loss-weight',
                               type=float,
                               default=1.0,
-                              help='Weight for language model loss in autoencoder training model. Default: %(default)s.')
+                              help='The weight for language modeling loss in reconstruction training. '
+                                   'Default: %(default)s.')
 
     train_params.add_argument('--batch-size', '-b',
                               type=int_greater_or_equal(1),

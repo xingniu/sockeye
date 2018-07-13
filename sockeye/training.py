@@ -74,7 +74,7 @@ class TrainingModel(model.SockeyeModel):
         self.output_dir = output_dir
         self.fixed_param_names = fixed_param_names
         self._bucketing = bucketing
-        self._alpha = config.weight_language_model
+        self._lm_loss_weight = config.lm_loss_weight
         self._gradient_compression_params = gradient_compression_params
         self._initialize(provide_data, provide_label, default_bucket_key)
         self._monitor = None  # type: Optional[mx.monitor.Monitor]
@@ -94,12 +94,11 @@ class TrainingModel(model.SockeyeModel):
         target_length = utils.compute_lengths(target)
         labels = mx.sym.reshape(data=mx.sym.Variable(C.TARGET_LABEL_NAME), shape=(-1,))
 
-        if self.config.autoencoder_training:
-            # reconstructor & language model
-            self.dual_encoder = self.encoder
-            self.dual_decoder = self.decoder
-            self.language_encoder = encoder.get_encoder(self.config.config_encoder, prefix=self.prefix+C.LANGUAGE_MODEL_PREFIX)
-            self.language_decoder = decoder.get_decoder(self.config.config_decoder, prefix=self.prefix+C.LANGUAGE_MODEL_PREFIX)
+        if self.config.reconstruction:
+            # reconstructor (backward encoder/decoder) & language model
+            self.bw_encoder = self.encoder
+            self.bw_decoder = self.decoder
+            self.lm_decoder = decoder.get_decoder(self.config.config_decoder, prefix=C.LANGUAGE_MODEL_PREFIX+self.prefix)
 
         self.model_loss = loss.get_loss(self.config.config_loss)
 
@@ -141,8 +140,12 @@ class TrainingModel(model.SockeyeModel):
 
             # decoder
             # target_decoded: (batch-size, target_len, decoder_depth)
-            (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded, source_encoded_length, source_encoded_seq_len,
-                                                                  target_embed, target_embed_length, target_embed_seq_len)
+            (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded,
+                                                                  source_encoded_length,
+                                                                  source_encoded_seq_len,
+                                                                  target_embed,
+                                                                  target_embed_length,
+                                                                  target_embed_seq_len)
 
             # target_decoded: (batch_size * target_seq_len, decoder_depth)
             target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
@@ -155,7 +158,7 @@ class TrainingModel(model.SockeyeModel):
 
             return mx.sym.Group(loss_output), data_names, label_names
 
-        def sym_gen_autoenc(seq_lens):
+        def sym_gen_reconstruction(seq_lens):
             """
             Returns a (grouped) loss symbol given source & target input lengths.
             Also returns data and label names for the BucketingModule.
@@ -172,45 +175,61 @@ class TrainingModel(model.SockeyeModel):
              target_embed_length,
              target_embed_seq_len) = self.embedding_target.encode(target, target_length, target_seq_len)
 
-            # encoder
+            # forward encoder
             # source_encoded: (batch_size, source_encoded_length, encoder_depth)
             (source_encoded,
              source_encoded_length,
-             source_encoded_seq_len) = self.encoder.encode(source_embed, source_embed_length, source_embed_seq_len)
+             source_encoded_seq_len) = self.encoder.encode(source_embed,
+                                                           source_embed_length,
+                                                           source_embed_seq_len)
 
-            # decoder
+            # forward decoder
             self.decoder.set_teacher_forcing(False)
             # target_decoded: (batch-size, target_len, decoder_depth)
+            # Assume source and target have the same length for now.
             (target_decoded,
              target_decoded_length,
-             target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded, source_encoded_length, source_encoded_seq_len,
-                                                                    None, None, target_embed_seq_len)
-            # reset teacher forcing mode
-            self.decoder.set_teacher_forcing(True)
+             target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded,
+                                                                    source_encoded_length,
+                                                                    source_encoded_seq_len,
+                                                                    None,
+                                                                    source_encoded_length,
+                                                                    source_encoded_seq_len)
             
             # language model
-            # lm_decoded: (batch_size, target_decoded_length, decoder_depth)
-            (lm_encoded,
-             lm_encoded_length,
-             lm_encoded_seq_len) = self.language_encoder.encode(target_decoded, target_decoded_length, target_decoded_seq_len)
-            (lm_decoded, _, _) = self.language_decoder.decode_sequence(target_decoded, target_decoded_length, target_decoded_seq_len,
-                                                                       lm_encoded, lm_encoded_length, lm_encoded_seq_len)
+            self.lm_decoder.set_teacher_forcing(True)
+            (lm_decoded, _, _) = self.lm_decoder.decode_sequence(source_encoded,
+                                                                 source_encoded_length,
+                                                                 source_encoded_seq_len,
+                                                                 target_decoded,
+                                                                 target_decoded_length,
+                                                                 target_decoded_seq_len)
 
-            # reconstructor
-            # dual_decoded: (batch_size, target_len, decoder_depth)
+            # backward encoder
+            # bw_encoded: (batch_size, target_decoded_length, encoder_depth)
+            (bw_encoded,
+             bw_encoded_length,
+             bw_encoded_seq_len) = self.bw_encoder.encode(target_decoded,
+                                                          target_decoded_length,
+                                                          target_decoded_seq_len)
+
+            # backward decoder
+            self.bw_decoder.set_teacher_forcing(True)
+            # bw_decoded: (batch_size, target_len, decoder_depth)
             # target must be the same as source input
-            (dual_encoded,
-             dual_encoded_length,
-             dual_encoded_seq_len) = self.dual_encoder.encode(target_decoded, target_decoded_length, target_decoded_seq_len)
-            (dual_decoded, _, _) = self.dual_decoder.decode_sequence(dual_encoded, dual_encoded_length, dual_encoded_seq_len,
-                                                                     target_embed, target_embed_length, target_embed_seq_len)
+            (bw_decoded, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
+                                                                 bw_encoded_length,
+                                                                 bw_encoded_seq_len,
+                                                                 target_embed,
+                                                                 target_embed_length,
+                                                                 target_embed_seq_len)
 
-            # dual_decoded: (batch_size * target_seq_len, decoder_depth)
-            dual_decoded = mx.sym.reshape(data=dual_decoded, shape=(-3, 0))
+            # bw_decoded: (batch_size * target_seq_len, decoder_depth)
+            bw_decoded = mx.sym.reshape(data=bw_decoded, shape=(-3, 0))
 
             # output layer
             # logits: (batch_size * target_seq_len, target_vocab_size)
-            logits = self.output_layer(dual_decoded)
+            logits = self.output_layer(bw_decoded)
 
             # reconstruction loss
             loss_reconstruction = self.model_loss.get_loss(logits, labels)
@@ -218,13 +237,13 @@ class TrainingModel(model.SockeyeModel):
             # language model loss
             target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
             lm_decoded = mx.sym.reshape(data=lm_decoded, shape=(-3, 0))
-            loss_output = loss.compute_dissimilarity_loss(target_decoded, lm_decoded, weight=self._alpha)
+            loss_output = loss.compute_dissimilarity_loss(target_decoded, lm_decoded, weight=self._lm_loss_weight)
 
             loss_output.extend(loss_reconstruction)
             return mx.sym.Group(loss_output), data_names, label_names
 
-        if self.config.autoencoder_training:
-            sym_gen = sym_gen_autoenc
+        if self.config.reconstruction:
+            sym_gen = sym_gen_reconstruction
         else:
             sym_gen = sym_gen_standard
 

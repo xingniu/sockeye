@@ -639,7 +639,6 @@ def create_model_config(args: argparse.Namespace,
                                                            pool_stride=args.conv_embed_pool_stride,
                                                            num_highway_layers=args.conv_embed_num_highway_layers,
                                                            dropout=args.conv_embed_dropout)
-
     if args.encoder == C.TRANSFORMER_WITH_CONV_EMBED_TYPE:
         config_conv = encoder.ConvolutionalEmbeddingConfig(num_embed=num_embed_source,
                                                            output_dim=num_embed_source,
@@ -684,8 +683,8 @@ def create_model_config(args: argparse.Namespace,
                                      weight_tying_type=args.weight_tying_type if args.weight_tying else None,
                                      weight_normalization=args.weight_normalization,
                                      output_layer_no_bias=args.output_layer_no_bias,
-                                     autoencoder_training=args.autoencoder_training,
-                                     weight_language_model=args.weight_language_model,
+                                     reconstruction=args.reconstruction,
+                                     lm_loss_weight=args.lm_loss_weight,
                                      lhuc=args.lhuc is not None)
     return model_config
 

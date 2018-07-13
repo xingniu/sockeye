@@ -89,6 +89,7 @@ class Decoder(ABC):
     def __init__(self, dtype):
         logger.info('{}.{} dtype: {}'.format(self.__module__, self.__class__.__name__, dtype))
         self.dtype = dtype
+        self.teacher_forcing = True
 
     @abstractmethod
     def decode_sequence(self,
@@ -196,6 +197,13 @@ class Decoder(ABC):
         """
         return None
 
+    def set_teacher_forcing(self, teacher_forcing):
+        """
+        Sets the teacher_forcing flag. When training the sequence prediction model, 
+        the ground truth is used if teacher_forcing=True (i.e. standard training),
+        otherwise the actual output is used (i.e. forward pass of reconstruction training).
+        """
+        self.teacher_forcing = teacher_forcing
 
 @Decoder.register(transformer.TransformerConfig, C.TRANSFORMER_DECODER_PREFIX)
 class TransformerDecoder(Decoder):
@@ -273,12 +281,12 @@ class TransformerDecoder(Decoder):
                            target_bias=target_bias,
                            source=source_encoded,
                            source_bias=source_bias)
-        target_decoded = self.final_process(data=target, prev=None)
+        target = self.final_process(data=target, prev=None)
 
-        # compute lengths: (batch_size,)
-        lengths = mx.sym.ones_like(source_encoded_lengths) * target_embed_max_length
+        # lengths: (batch_size,)
+        lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
 
-        return target_decoded, lengths, target_embed_max_length
+        return target, lengths, target_embed_max_length
 
     def decode_step(self,
                     step: int,
@@ -502,9 +510,6 @@ class RecurrentDecoder(Decoder):
                  config: RecurrentDecoderConfig,
                  prefix: str = C.RNN_DECODER_PREFIX) -> None:
         super().__init__(config.dtype)
-
-        self.teacher_forcing = True
-
         # TODO: implement variant without input feeding
         self.config = config
         self.rnn_config = config.rnn_config
@@ -566,9 +571,6 @@ class RecurrentDecoder(Decoder):
                 self.init_norms.append(layers.LayerNormalization(prefix="%senc2decinit_%d_norm" % (self.prefix,
                                                                                                    state_idx)))
 
-    def set_teacher_forcing(self, teacher_forcing):
-        self.teacher_forcing = teacher_forcing
-
     def decode_sequence(self,
                         source_encoded: mx.sym.Symbol,
                         source_encoded_lengths: mx.sym.Symbol,
@@ -615,31 +617,26 @@ class RecurrentDecoder(Decoder):
         hidden_states = []  # type: List[mx.sym.Symbol]
         # TODO: possible alternative: feed back the context vector instead of the hidden (see lamtram)
         self.reset()
-        if self.teacher_forcing:
-            for seq_idx in range(target_embed_max_length):
-                # hidden: (batch_size, rnn_num_hidden)
-                state, attention_state = self._step(target_embed[seq_idx],
-                                                    state,
-                                                    attention_func,
-                                                    attention_state,
-                                                    seq_idx)
-                hidden_states.append(state.hidden)
-        else:
-            for seq_idx in range(target_embed_max_length):
-                # hidden: (batch_size, rnn_num_hidden)
-                state, attention_state = self._step(state.hidden,
-                                                    state,
-                                                    attention_func,
-                                                    attention_state,
-                                                    seq_idx)
-                hidden_states.append(state.hidden)
+        for seq_idx in range(target_embed_max_length):
+            # hidden: (batch_size, rnn_num_hidden)
+            if self.teacher_forcing:
+                word_vec_prev = target_embed[seq_idx]
+            else:
+                word_vec_prev = state.hidden
+            state, attention_state = self._step(word_vec_prev,
+                                                state,
+                                                attention_func,
+                                                attention_state,
+                                                seq_idx,
+                                                enc_last_hidden=enc_last_hidden)
+            hidden_states.append(state.hidden)
 
         # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
-        target_decoded = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
-        # compute lengths: (batch_size,)
-        lengths = mx.sym.ones_like(source_encoded_lengths) * target_embed_max_length
+        target_hidden = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
+        # lengths: (batch_size,)
+        lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
 
-        return target_decoded, lengths, target_embed_max_length
+        return target_hidden, lengths, target_embed_max_length
 
     def decode_step(self,
                     step: int,
@@ -1069,16 +1066,16 @@ class ConvolutionalDecoder(Decoder):
         """
 
         # (batch_size, target_seq_len, num_hidden)
-        target_decoded = self._decode(source_encoded=source_encoded,
+        target_hidden = self._decode(source_encoded=source_encoded,
                                      source_encoded_lengths=source_encoded_lengths,
                                      target_embed=target_embed,
                                      target_embed_lengths=target_embed_lengths,
                                      target_embed_max_length=target_embed_max_length)
 
-        # compute lengths: (batch_size,)
-        lengths = mx.sym.ones_like(source_encoded_lengths) * target_embed_max_length
+        # lengths: (batch_size,)
+        lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
 
-        return target_decoded, lengths, target_embed_max_length
+        return target_hidden, lengths, target_embed_max_length
 
     def _decode(self,
                 source_encoded: mx.sym.Symbol,

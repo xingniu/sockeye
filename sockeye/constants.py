@@ -43,8 +43,7 @@ CNN_ENCODER_PREFIX = ENCODER_PREFIX + "cnn_"
 CHAR_SEQ_ENCODER_PREFIX = ENCODER_PREFIX + "char_"
 DEFAULT_OUTPUT_LAYER_PREFIX = "target_output_"
 
-# dual learning model prefixes
-DUAL_MODEL_PREFIX = "dual_"
+# reconstruction model prefixes
 LANGUAGE_MODEL_PREFIX = 'lm_'
 
 # embedding prefixes

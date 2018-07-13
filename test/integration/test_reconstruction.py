@@ -23,14 +23,14 @@ _LINE_MAX_LENGTH = 9
 _TEST_MAX_LENGTH = 20
 
 ENCODER_DECODER_SETTINGS = [
-    # Autoencoder - "Vanilla" LSTM encoder-decoder with attention
-    ("--autoencoder-training --encoder rnn --decoder rnn --num-layers 1 --rnn-cell-type lstm --rnn-num-hidden 16 --num-embed 16 --rnn-attention-type mlp"
+    # Reconstruction - "Vanilla" LSTM encoder-decoder with attention
+    ("--reconstruction --encoder rnn --decoder rnn --num-layers 1 --rnn-cell-type lstm --rnn-num-hidden 16 --num-embed 16 --rnn-attention-type mlp"
      " --rnn-attention-num-hidden 16 --batch-size 13 --loss cross-entropy --optimized-metric perplexity --max-updates 10"
      " --checkpoint-frequency 10 --optimizer adam --initial-learning-rate 0.01",
      "--beam-size 2",
      True, False, False),
-    # Autoencoder - "Kitchen sink" LSTM encoder-decoder with attention
-    ("--autoencoder-training --encoder rnn --decoder rnn --num-layers 4:2 --rnn-cell-type lstm --rnn-num-hidden 16"
+    # Reconstruction - "Kitchen sink" LSTM encoder-decoder with attention
+    ("--reconstruction --encoder rnn --decoder rnn --num-layers 4:2 --rnn-cell-type lstm --rnn-num-hidden 16"
      " --rnn-residual-connections"
      " --num-embed 16 --rnn-attention-type coverage --rnn-attention-num-hidden 16 --weight-tying "
      "--rnn-attention-use-prev-word --rnn-context-gating --layer-normalization --batch-size 13 "
@@ -46,14 +46,14 @@ ENCODER_DECODER_SETTINGS = [
 
 @pytest.mark.parametrize("train_params, translate_params, restrict_lexicon, use_prepared_data, use_source_factors",
                          ENCODER_DECODER_SETTINGS)
-def test_autoencoder_training(train_params: str,
-                              translate_params: str,
-                              restrict_lexicon: bool,
-                              use_prepared_data: bool,
-                              use_source_factors: bool):
+def test_reconstruction(train_params: str,
+                        translate_params: str,
+                        restrict_lexicon: bool,
+                        use_prepared_data: bool,
+                        use_source_factors: bool):
     """Task: copy short sequences of digits"""
 
-    with tmp_digits_dataset(prefix="test_dual_train_translate",
+    with tmp_digits_dataset(prefix="test_reconstruction_train_translate",
                             train_line_count=_TRAIN_LINE_COUNT,
                             train_max_length=_LINE_MAX_LENGTH,
                             dev_line_count=_DEV_LINE_COUNT,
@@ -80,9 +80,9 @@ def test_autoencoder_training(train_params: str,
                             translate_params=translate_params,
                             translate_params_equiv=translate_params_batch,
                             train_source_path=data['source'],
-                            train_target_path=data['target'],
+                            train_target_path=data['source'],
                             dev_source_path=data['validation_source'],
-                            dev_target_path=data['validation_target'],
+                            dev_target_path=data['validation_source'],
                             test_source_path=data['test_source'],
                             test_target_path=data['test_target'],
                             train_source_factor_paths=train_source_factor_paths,
