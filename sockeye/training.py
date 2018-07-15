@@ -32,7 +32,6 @@ from . import checkpoint_decoder
 from . import constants as C
 from . import data_io
 from . import decoder
-from . import encoder
 from . import layers
 from . import loss
 from . import lr_scheduler
@@ -99,18 +98,18 @@ class TrainingModel(model.SockeyeModel):
             # reconstructor (backward encoder/decoder)
             self.bw_encoder = self.encoder
             self.bw_decoder = self.decoder
+
             # language model decoder
-            self.lm_decoder = decoder.get_decoder(self.config.config_decoder, prefix=self.prefix + C.LANGUAGE_MODEL_PREFIX)
-
-            lm_out_weight_target = mx.sym.Variable(self.prefix + C.LANGUAGE_MODEL_PREFIX + "target_output_weight",
+            self.lm_decoder = decoder.get_decoder(self.config.config_decoder,
+                                                  prefix=C.LANGUAGE_MODEL_PREFIX + self.prefix)
+            lm_out_weight_target = mx.sym.Variable(C.LANGUAGE_MODEL_PREFIX + self.prefix + "target_output_weight",
                                                    shape=(self.config.vocab_target_size, self.lm_decoder.get_num_hidden()))
-
             self.lm_output_layer = layers.OutputLayer(hidden_size=self.lm_decoder.get_num_hidden(),
                                                       vocab_size=self.config.vocab_target_size,
                                                       weight=lm_out_weight_target,
                                                       weight_normalization=self.config.weight_normalization,
                                                       no_bias=self.config.output_layer_no_bias,
-                                                      prefix=self.prefix + C.LANGUAGE_MODEL_PREFIX + C.DEFAULT_OUTPUT_LAYER_PREFIX)
+                                                      prefix=C.LANGUAGE_MODEL_PREFIX + self.prefix + C.DEFAULT_OUTPUT_LAYER_PREFIX)
 
         self.model_loss = loss.get_loss(self.config.config_loss)
 
@@ -205,15 +204,15 @@ class TrainingModel(model.SockeyeModel):
                                                                     source_encoded_seq_len,
                                                                     None,
                                                                     source_encoded_length,
-                                                                    target_seq_len)
+                                                                    target_embed_seq_len)
 
-            # fw_target_decoded: (batch_size * target_seq_len, decoder_depth)
-            fw_target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
+            # fw_decoded: (batch_size * target_seq_len, decoder_depth)
+            fw_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
 
-            # output layer
-            # target_logits: (batch_size * target_seq_len, target_vocab_size)
-            target_logits = self.output_layer(fw_target_decoded)
-            
+            # forward output layer
+            # fw_logits: (batch_size * target_seq_len, target_vocab_size)
+            fw_logits = self.output_layer(fw_decoded)
+
             # language model
             # lm_decoded: (batch_size, target_seq_len, lm_decoder_depth)
             self.lm_decoder.set_teacher_forcing(True)
@@ -242,7 +241,7 @@ class TrainingModel(model.SockeyeModel):
             # backward decoder
             self.bw_decoder.set_teacher_forcing(True)
             # bw_decoded: (batch_size, source_seq_len, decoder_depth)
-            # Assume the provided target is the same as source
+            # Assume the provided target is the same as the source
             (bw_decoded, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
                                                                  bw_encoded_length,
                                                                  bw_encoded_seq_len,
@@ -258,11 +257,11 @@ class TrainingModel(model.SockeyeModel):
             bw_logits = self.output_layer(bw_decoded)
 
             # computes total loss
-            loss_output = self.model_loss.get_dual_loss(lm_logits,
-                                                        target_logits,
-                                                        bw_logits,
-                                                        labels,
-                                                        lm_loss_weight=self._lm_loss_weight)
+            loss_output = self.model_loss.get_roundtrip_loss(lm_logits,
+                                                             fw_logits,
+                                                             bw_logits,
+                                                             labels,
+                                                             lm_loss_weight=self._lm_loss_weight)
 
             return mx.sym.Group(loss_output), data_names, label_names
 
@@ -397,7 +396,7 @@ class TrainingModel(model.SockeyeModel):
         Returns the names of model outputs
         """
         if self.config.reconstruction and not is_train:
-            return [C.BACKWARD_MODEL_OUTPUT_NAME]
+            return [C.RECONSTRUCTION_SOFTMAX_OUTPUT_NAME]
         else:
             return [C.SOFTMAX_OUTPUT_NAME]
 

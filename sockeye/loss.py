@@ -80,38 +80,6 @@ class Loss(ABC):
         """
         raise NotImplementedError()
 
-    def get_dual_loss(self,
-                      lm_logits: mx.sym.Symbol,
-                      target_logits: mx.sym.Symbol,
-                      backward_logits: mx.sym.Symbol,
-                      backward_labels: mx.sym.Symbol,
-                      grad_scale: float = 1.0,
-                      lm_loss_weight: float = 1.0,
-                      prefix: str = '') -> List[mx.sym.Symbol]:
-        """
-        Returns the dual loss as the linear combination of LM loss and reconstruction loss.
-
-        :param lm_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
-        :param target_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
-        :param backward_logits: Shape: (batch_size * source_seq_len, source_vocab_size).
-        :param backward_labels: Shape: (batch_size * source_seq_len,).
-        :return: List of loss symbol.
-        """
-        target_probs = mx.sym.softmax(data=target_logits)
-        target_output = mx.sym.MakeLoss(target_probs, grad_scale=0, name=C.SOFTMAX_NAME)
-
-        lm_output = self.get_loss(lm_logits,
-                                  target_probs,
-                                  grad_scale=lm_loss_weight * grad_scale,
-                                  prefix=prefix + C.LANGUAGE_MODEL_PREFIX)[0]
-
-        bw_output = self.get_loss(backward_logits,
-                                  backward_labels,
-                                  grad_scale=grad_scale,
-                                  prefix=prefix + C.BACKWARD_MODEL_PREFIX)[0]
-
-        return [bw_output, lm_output, target_output]
-
     @abstractmethod
     def create_metric(self, output_names) -> EvalMetric:
         """
@@ -132,12 +100,18 @@ class CrossEntropyLoss(Loss):
                     loss_config.normalization_type, loss_config.label_smoothing)
         self.loss_config = loss_config
 
-    def get_loss(self, logits: mx.sym.Symbol, labels: mx.sym.Symbol, grad_scale: float = 1.0, prefix: str = '') -> List[mx.sym.Symbol]:
+    def get_loss(self,
+                 logits: mx.sym.Symbol,
+                 labels: mx.sym.Symbol,
+                 grad_scale: float = 1.0,
+                 prefix: str = '') -> List[mx.sym.Symbol]:
         """
         Returns loss and softmax output symbols given logits and integer-coded labels.
 
         :param logits: Shape: (batch_size * target_seq_len, target_vocab_size).
         :param labels: Shape: (batch_size * target_seq_len,).
+        :param grad_scale: Scale the gradient by a float factor.
+        :param prefix: Name prefix for the output.
         :return: List of loss symbol.
         """
         if self.loss_config.normalization_type == C.LOSS_NORM_VALID:
@@ -148,11 +122,44 @@ class CrossEntropyLoss(Loss):
             raise ValueError("Unknown loss normalization type: %s" % self.loss_config.normalization_type)
         return [mx.sym.SoftmaxOutput(data=logits,
                                      label=labels,
+                                     grad_scale=grad_scale,
                                      ignore_label=C.PAD_ID,
                                      use_ignore=True,
                                      normalization=normalization,
                                      smooth_alpha=self.loss_config.label_smoothing,
                                      name=prefix + C.SOFTMAX_NAME)]
+
+    def get_roundtrip_loss(self,
+                           lm_logits: mx.sym.Symbol,
+                           target_logits: mx.sym.Symbol,
+                           reconstruction_logits: mx.sym.Symbol,
+                           reconstruction_labels: mx.sym.Symbol,
+                           lm_loss_weight: float = 1.0) -> List[mx.sym.Symbol]:
+        """
+        Returns the linear combination of the LM loss and the reconstruction loss.
+
+        :param lm_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
+        :param target_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
+        :param reconstruction_logits: Shape: (batch_size * source_seq_len, source_vocab_size).
+        :param reconstruction_labels: Shape: (batch_size * source_seq_len,).
+        :param lm_loss_weight: Weight for the LM loss.
+        :return: List of loss symbol.
+        """
+        target_probs = mx.sym.softmax(data=target_logits)
+
+        lm_output = self.get_loss(lm_logits,
+                                  target_probs,
+                                  grad_scale=lm_loss_weight,
+                                  prefix=C.LANGUAGE_MODEL_PREFIX)
+
+        rc_output = self.get_loss(reconstruction_logits,
+                                  reconstruction_labels,
+                                  grad_scale=1.0,
+                                  prefix=C.RECONSTRUCTION_PREFIX)
+
+        forward_output = mx.sym.MakeLoss(target_probs, grad_scale=0, name=C.SOFTMAX_NAME)
+
+        return lm_output + rc_output + [forward_output]
 
     def create_metric(self, output_names) -> "CrossEntropyMetric":
         return CrossEntropyMetric(self.loss_config, output_names=output_names)
