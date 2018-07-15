@@ -44,7 +44,9 @@ CHAR_SEQ_ENCODER_PREFIX = ENCODER_PREFIX + "char_"
 DEFAULT_OUTPUT_LAYER_PREFIX = "target_output_"
 
 # reconstruction model prefixes
-LANGUAGE_MODEL_PREFIX = 'lm_'
+LANGUAGE_MODEL_PREFIX = 'language_'
+LANGUAGE_MODEL_OUTPUT_PREFIX = 'language_'
+BACKWARD_DECODER_OUTPUT_PREFIX = 'backward_'
 
 # embedding prefixes
 SOURCE_EMBEDDING_PREFIX = "source_" + EMBEDDING_PREFIX

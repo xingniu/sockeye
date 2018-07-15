@@ -692,6 +692,7 @@ def create_model_config(args: argparse.Namespace,
                                      output_layer_no_bias=args.output_layer_no_bias,
                                      reconstruction=args.reconstruction,
                                      lm_loss_weight=args.lm_loss_weight,
+                                     max_seq_len_target=max_seq_len_target,
                                      lhuc=args.lhuc is not None)
     return model_config
 

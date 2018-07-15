@@ -65,6 +65,7 @@ class ModelConfig(Config):
                  output_layer_no_bias: bool = False,
                  reconstruction: bool = False,
                  lm_loss_weight: float = 1.0,
+                 max_seq_len_target: int = 100,
                  lhuc: bool = False) -> None:
         super().__init__()
         self.config_data = config_data
@@ -81,6 +82,7 @@ class ModelConfig(Config):
         self.output_layer_no_bias = output_layer_no_bias
         self.reconstruction = reconstruction
         self.lm_loss_weight = lm_loss_weight
+        self.max_seq_len_target = max_seq_len_target
         if weight_tying and weight_tying_type is None:
             raise RuntimeError("weight_tying_type must be specified when using weight_tying.")
         self.lhuc = lhuc
