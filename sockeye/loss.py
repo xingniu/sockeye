@@ -101,7 +101,7 @@ class Loss(ABC):
         pass
 
     @abstractmethod
-    def create_metric(self) -> EvalMetric:
+    def create_metric(self, output_names) -> EvalMetric:
         """
         Create an instance of the EvalMetric that corresponds to this Loss function.
         """
