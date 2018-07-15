@@ -159,7 +159,7 @@ class CrossEntropyLoss(Loss):
         :param backward_labels: Shape: (batch_size * source_seq_len,).
         :return: List of loss symbol.
         """
-        target_probs = mx.sym.softmax(data=target_logits, name=C.SOFTMAX_NAME)
+        target_probs = mx.sym.softmax(data=target_logits)
         lm_output = self.get_loss(lm_logits,
                                   target_probs,
                                   grad_scale=lm_loss_weight * grad_scale,
@@ -170,10 +170,10 @@ class CrossEntropyLoss(Loss):
                                   grad_scale=grad_scale,
                                   prefix=prefix + C.BACKWARD_DECODER_OUTPUT_PREFIX)[0]
 
-        return [bw_output, lm_output]
+        return [bw_output, lm_output, mx.sym.MakeLoss(target_probs, grad_scale=0, name=C.SOFTMAX_NAME)]
 
-    def create_metric(self) -> "CrossEntropyMetric":
-        return CrossEntropyMetric(self.loss_config)
+    def create_metric(self, output_names) -> "CrossEntropyMetric":
+        return CrossEntropyMetric(self.loss_config, output_names=output_names)
 
 
 class CrossEntropyMetric(EvalMetric):

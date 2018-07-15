@@ -76,7 +76,6 @@ class TrainingModel(model.SockeyeModel):
         self.fixed_param_names = fixed_param_names
         self._bucketing = bucketing
         self._lm_loss_weight = config.lm_loss_weight
-        self._max_seq_len_target = config.max_seq_len_target
         self._gradient_compression_params = gradient_compression_params
         self._initialize(provide_data, provide_label, default_bucket_key)
         self._monitor = None  # type: Optional[mx.monitor.Monitor]
@@ -206,7 +205,7 @@ class TrainingModel(model.SockeyeModel):
                                                                     source_encoded_seq_len,
                                                                     None,
                                                                     source_encoded_length,
-                                                                    self._max_seq_len_target)
+                                                                    target_seq_len)
 
             # fw_target_decoded: (batch_size * target_seq_len, decoder_depth)
             fw_target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
@@ -393,12 +392,11 @@ class TrainingModel(model.SockeyeModel):
         # TODO: Push update to MXNet to expose the optimizer (Module should have a get_optimizer method)
         return self.current_module._optimizer
 
-    @property
-    def output_names(self) -> List[str]:
+    def output_names(self, is_train: bool = True) -> List[str]:
         """
         Returns the names of model outputs
         """
-        if self.config.reconstruction:
+        if self.config.reconstruction and not is_train:
             return [C.BACKWARD_DECODER_OUTPUT_PREFIX + C.SOFTMAX_OUTPUT_NAME]
         else:
             return [C.SOFTMAX_OUTPUT_NAME]
@@ -978,14 +976,14 @@ class EarlyStoppingTrainer:
                         loss: loss.Loss) -> Tuple[mx.metric.EvalMetric,
                                                   mx.metric.EvalMetric,
                                                   Optional[mx.metric.EvalMetric]]:
-        metric_train = self._create_eval_metric_composite(metrics, self.model.output_names)
-        metric_val = self._create_eval_metric_composite(metrics, self.model.output_names)
+        metric_train = self._create_eval_metric_composite(metrics, self.model.output_names(is_train=True))
+        metric_val = self._create_eval_metric_composite(metrics, self.model.output_names(is_train=False))
         # If optimizer requires it, track loss as metric
         if isinstance(optimizer, SockeyeOptimizer):
             if optimizer.request_optimized_metric:
                 metric_loss = self._create_eval_metric(self.state.early_stopping_metric)
             else:
-                metric_loss = loss.create_metric()
+                metric_loss = loss.create_metric(self.model.output_names(is_train=True))
         else:
             metric_loss = None
         return metric_train, metric_val, metric_loss
