@@ -397,7 +397,7 @@ class TrainingModel(model.SockeyeModel):
         Returns the names of model outputs
         """
         if self.config.reconstruction and not is_train:
-            return [C.BACKWARD_DECODER_OUTPUT_PREFIX + C.SOFTMAX_OUTPUT_NAME]
+            return [C.BACKWARD_MODEL_OUTPUT_NAME]
         else:
             return [C.SOFTMAX_OUTPUT_NAME]
 

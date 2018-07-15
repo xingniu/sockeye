@@ -80,7 +80,6 @@ class Loss(ABC):
         """
         raise NotImplementedError()
 
-    @abstractmethod
     def get_dual_loss(self,
                       lm_logits: mx.sym.Symbol,
                       target_logits: mx.sym.Symbol,
@@ -98,7 +97,20 @@ class Loss(ABC):
         :param backward_labels: Shape: (batch_size * source_seq_len,).
         :return: List of loss symbol.
         """
-        pass
+        target_probs = mx.sym.softmax(data=target_logits)
+        target_output = mx.sym.MakeLoss(target_probs, grad_scale=0, name=C.SOFTMAX_NAME)
+
+        lm_output = self.get_loss(lm_logits,
+                                  target_probs,
+                                  grad_scale=lm_loss_weight * grad_scale,
+                                  prefix=prefix + C.LANGUAGE_MODEL_PREFIX)[0]
+
+        bw_output = self.get_loss(backward_logits,
+                                  backward_labels,
+                                  grad_scale=grad_scale,
+                                  prefix=prefix + C.BACKWARD_MODEL_PREFIX)[0]
+
+        return [bw_output, lm_output, target_output]
 
     @abstractmethod
     def create_metric(self, output_names) -> EvalMetric:
@@ -141,36 +153,6 @@ class CrossEntropyLoss(Loss):
                                      normalization=normalization,
                                      smooth_alpha=self.loss_config.label_smoothing,
                                      name=prefix + C.SOFTMAX_NAME)]
-
-    def get_dual_loss(self,
-                      lm_logits: mx.sym.Symbol,
-                      target_logits: mx.sym.Symbol,
-                      backward_logits: mx.sym.Symbol,
-                      backward_labels: mx.sym.Symbol,
-                      grad_scale: float = 1.0,
-                      lm_loss_weight: float = 1.0,
-                      prefix: str = '') -> List[mx.sym.Symbol]:
-        """
-        Returns the dual loss as the linear combination of LM loss and reconstruction loss.
-
-        :param lm_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
-        :param target_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
-        :param backward_logits: Shape: (batch_size * source_seq_len, source_vocab_size).
-        :param backward_labels: Shape: (batch_size * source_seq_len,).
-        :return: List of loss symbol.
-        """
-        target_probs = mx.sym.softmax(data=target_logits)
-        lm_output = self.get_loss(lm_logits,
-                                  target_probs,
-                                  grad_scale=lm_loss_weight * grad_scale,
-                                  prefix=prefix + C.LANGUAGE_MODEL_OUTPUT_PREFIX)[0]
-
-        bw_output = self.get_loss(backward_logits,
-                                  backward_labels,
-                                  grad_scale=grad_scale,
-                                  prefix=prefix + C.BACKWARD_DECODER_OUTPUT_PREFIX)[0]
-
-        return [bw_output, lm_output, mx.sym.MakeLoss(target_probs, grad_scale=0, name=C.SOFTMAX_NAME)]
 
     def create_metric(self, output_names) -> "CrossEntropyMetric":
         return CrossEntropyMetric(self.loss_config, output_names=output_names)
