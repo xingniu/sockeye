@@ -117,6 +117,9 @@ def check_arg_compatibility(args: argparse.Namespace):
         check_condition(args.rnn_num_hidden == args.num_embed[0],
                         "Source embedding size must match RNN decoder size: %s vs. %s"
                         % (args.rnn_num_hidden, args.num_embed[0]))
+        check_condition(args.source == args.target,
+                        "Source and target side of the training data must be the same: %s vs. %s"
+                        % (args.source, args.target))
 
 
 def check_resume(args: argparse.Namespace, output_folder: str) -> bool:
@@ -814,6 +817,11 @@ def train(args: argparse.Namespace):
         temp_dir = tempfile.TemporaryDirectory()  # Will be automatically removed
         args.output = temp_dir.name
         args.max_updates = 0
+
+    if args.reconstruction:
+        # Modify weight-tying type so that it's compatible with the training mode
+        args.weight_tying = True
+        args.weight_tying_type = C.WEIGHT_TYING_SRC_TRG_SOFTMAX
 
     utils.seed_rngs(args.seed)
 

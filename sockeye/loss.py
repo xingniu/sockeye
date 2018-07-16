@@ -106,9 +106,9 @@ class Loss(ABC):
                                   grad_scale=1.0,
                                   prefix=C.RECONSTRUCTION_PREFIX)
 
-        softmax_output = mx.sym.MakeLoss(translation_logits, grad_scale=0, name=C.SOFTMAX_NAME)
+        softmax_output = [mx.sym.MakeLoss(translation_logits, grad_scale=0, name=C.SOFTMAX_NAME)]
 
-        return lm_output + rc_output + [softmax_output]
+        return lm_output + rc_output + softmax_output
 
     @abstractmethod
     def create_metric(self, output_names) -> EvalMetric:
