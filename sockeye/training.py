@@ -425,17 +425,20 @@ class TrainingModel(model.SockeyeModel):
         """
         self.current_module.load_optimizer_states(fname)
 
-    def initialize_parameters(self, initializer: mx.init.Initializer, allow_missing_params: bool):
+    def initialize_parameters(self, initializer: mx.init.Initializer,
+                              allow_missing_params: bool, allow_extra_params :bool):
         """
         Initializes the parameters of the underlying module.
 
         :param initializer: Parameter initializer.
         :param allow_missing_params: Whether to allow missing parameters.
+        :param allow_extra_params: Whether to allow extra parameters.
         """
         self.module.init_params(initializer=initializer,
                                 arg_params=self.params,
                                 aux_params=self.aux_params,
                                 allow_missing=allow_missing_params,
+                                allow_extra=allow_extra_params,
                                 force_init=False)
 
     def log_parameters(self):
@@ -466,17 +469,20 @@ class TrainingModel(model.SockeyeModel):
         self.aux_params = aux_params
         super().save_params_to_file(fname)
 
-    def load_params_from_file(self, fname: str, allow_missing_params: bool = False):
+    def load_params_from_file(self, fname: str,
+                              allow_missing_params: bool = False, allow_extra_params: bool = False):
         """
         Loads parameters from a file and sets the parameters of the underlying module and this model instance.
 
         :param fname: File name to load parameters from.
         :param allow_missing_params: If set, the given parameters are allowed to be a subset of the Module parameters.
+        :param allow_extra_params: If set, the given parameters are allowed to be a superset of the Module parameters.
         """
         super().load_params_from_file(fname)  # sets self.params & self.aux_params
         self.module.set_params(arg_params=self.params,
                                aux_params=self.aux_params,
-                               allow_missing=allow_missing_params)
+                               allow_missing=allow_missing_params,
+                               allow_extra=allow_extra_params)
 
     def install_monitor(self, monitor_pattern: str, monitor_stat_func_name: str):
         """
@@ -589,6 +595,7 @@ class EarlyStoppingTrainer:
             mxmonitor_pattern: Optional[str] = None,
             mxmonitor_stat_func: Optional[str] = None,
             allow_missing_parameters: bool = False,
+            allow_extra_parameters: bool = False,
             existing_parameters: Optional[str] = None):
         """
         Fits model to data given by train_iter using early-stopping w.r.t data given by val_iter.
@@ -620,6 +627,7 @@ class EarlyStoppingTrainer:
                when using MXNEt's monitor.
 
         :param allow_missing_parameters: Allow missing parameters when initializing model parameters from file.
+        :param allow_extra_parameters: Allow extra parameters when initializing model parameters from file.
         :param existing_parameters: Optional filename of existing/pre-trained parameters to initialize from.
 
         :return: Best score on validation data observed during training.
@@ -627,7 +635,7 @@ class EarlyStoppingTrainer:
         self._check_args(metrics, early_stopping_metric, lr_decay_opt_states_reset, lr_decay_param_reset, decoder)
         logger.info("Early stopping by optimizing '%s'", early_stopping_metric)
 
-        self._initialize_parameters(existing_parameters, allow_missing_parameters)
+        self._initialize_parameters(existing_parameters, allow_missing_parameters, allow_extra_parameters)
         self._initialize_optimizer()
 
         resume_training = os.path.exists(self.training_state_dirname)
@@ -902,11 +910,14 @@ class EarlyStoppingTrainer:
             if os.path.exists(best_opt_states_fname):
                 os.remove(best_opt_states_fname)
 
-    def _initialize_parameters(self, params: Optional[str], allow_missing_params: bool):
-        self.model.initialize_parameters(self.optimizer_config.initializer, allow_missing_params)
+    def _initialize_parameters(self, params: Optional[str],
+                               allow_missing_params: bool, allow_extra_params: bool):
+        self.model.initialize_parameters(self.optimizer_config.initializer, allow_missing_params, allow_extra_params)
         if params is not None:
             logger.info("Training will start with parameters loaded from '%s'", params)
-            self.model.load_params_from_file(params, allow_missing_params=allow_missing_params)
+            self.model.load_params_from_file(params,
+                                             allow_missing_params=allow_missing_params,
+                                             allow_extra_params=allow_extra_params)
         self.model.log_parameters()
 
     def _initialize_optimizer(self):

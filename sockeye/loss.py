@@ -80,6 +80,36 @@ class Loss(ABC):
         """
         raise NotImplementedError()
 
+    def get_roundtrip_loss(self,
+                           lm_logits: mx.sym.Symbol,
+                           translation_logits: mx.sym.Symbol,
+                           reconstruction_logits: mx.sym.Symbol,
+                           reconstruction_labels: mx.sym.Symbol,
+                           lm_loss_weight: float = 1.0) -> List[mx.sym.Symbol]:
+        """
+        Returns the linear combination of the LM loss and the reconstruction loss.
+
+        :param lm_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
+        :param translation_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
+        :param reconstruction_logits: Shape: (batch_size * source_seq_len, source_vocab_size).
+        :param reconstruction_labels: Shape: (batch_size * source_seq_len,).
+        :param lm_loss_weight: Weight for the LM loss.
+        :return: List of loss symbol.
+        """
+        lm_output = self.get_loss(lm_logits,
+                                  mx.sym.softmax(data=translation_logits),
+                                  grad_scale=lm_loss_weight,
+                                  prefix=C.LANGUAGE_MODEL_PREFIX)
+
+        rc_output = self.get_loss(reconstruction_logits,
+                                  reconstruction_labels,
+                                  grad_scale=1.0,
+                                  prefix=C.RECONSTRUCTION_PREFIX)
+
+        softmax_output = mx.sym.MakeLoss(translation_logits, grad_scale=0, name=C.SOFTMAX_NAME)
+
+        return lm_output + rc_output + [softmax_output]
+
     @abstractmethod
     def create_metric(self, output_names) -> EvalMetric:
         """
@@ -128,38 +158,6 @@ class CrossEntropyLoss(Loss):
                                      normalization=normalization,
                                      smooth_alpha=self.loss_config.label_smoothing,
                                      name=prefix + C.SOFTMAX_NAME)]
-
-    def get_roundtrip_loss(self,
-                           lm_logits: mx.sym.Symbol,
-                           target_logits: mx.sym.Symbol,
-                           reconstruction_logits: mx.sym.Symbol,
-                           reconstruction_labels: mx.sym.Symbol,
-                           lm_loss_weight: float = 1.0) -> List[mx.sym.Symbol]:
-        """
-        Returns the linear combination of the LM loss and the reconstruction loss.
-
-        :param lm_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
-        :param target_logits: Shape: (batch_size * target_seq_len, target_vocab_size).
-        :param reconstruction_logits: Shape: (batch_size * source_seq_len, source_vocab_size).
-        :param reconstruction_labels: Shape: (batch_size * source_seq_len,).
-        :param lm_loss_weight: Weight for the LM loss.
-        :return: List of loss symbol.
-        """
-        target_probs = mx.sym.softmax(data=target_logits)
-
-        lm_output = self.get_loss(lm_logits,
-                                  target_probs,
-                                  grad_scale=lm_loss_weight,
-                                  prefix=C.LANGUAGE_MODEL_PREFIX)
-
-        rc_output = self.get_loss(reconstruction_logits,
-                                  reconstruction_labels,
-                                  grad_scale=1.0,
-                                  prefix=C.RECONSTRUCTION_PREFIX)
-
-        forward_output = mx.sym.MakeLoss(target_probs, grad_scale=0, name=C.SOFTMAX_NAME)
-
-        return lm_output + rc_output + [forward_output]
 
     def create_metric(self, output_names) -> "CrossEntropyMetric":
         return CrossEntropyMetric(self.loss_config, output_names=output_names)

@@ -916,6 +916,7 @@ def train(args: argparse.Namespace):
                     mxmonitor_pattern=args.monitor_pattern,
                     mxmonitor_stat_func=args.monitor_stat_func,
                     allow_missing_parameters=args.allow_missing_params or model_config.lhuc,
+                    allow_extra_parameters=args.allow_extra_params,
                     existing_parameters=args.params)
 
 
