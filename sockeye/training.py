@@ -57,6 +57,9 @@ class TrainingModel(model.SockeyeModel):
             unrolled to the full length.
     :param gradient_compression_params: Optional dictionary of gradient compression parameters.
     :param fixed_param_names: Optional list of params to fix during training (i.e. their values will not be trained).
+    :param reconstruction: Fine-tune bidirectional NMT models by reconstructing monolingual data.
+    :param lm_config: Configuration object holding details about the language model.
+    :param lm_loss_weight: The weight for language modeling loss in reconstruction training.
     """
 
     def __init__(self,
@@ -68,13 +71,18 @@ class TrainingModel(model.SockeyeModel):
                  default_bucket_key: Tuple[int, int],
                  bucketing: bool,
                  gradient_compression_params: Optional[Dict[str, Any]] = None,
-                 fixed_param_names: Optional[List[str]] = None) -> None:
+                 fixed_param_names: Optional[List[str]] = None,
+                 reconstruction: Optional[bool] = False,
+                 lm_config: Optional[model.ModelConfig] = None,
+                 lm_loss_weight: Optional[float] = 1.0) -> None:
         super().__init__(config)
         self.context = context
         self.output_dir = output_dir
         self.fixed_param_names = fixed_param_names
+        self.reconstruction = reconstruction
+        self.lm_config = lm_config
+        self.lm_loss_weight = lm_loss_weight
         self._bucketing = bucketing
-        self._lm_loss_weight = config.lm_loss_weight
         self._gradient_compression_params = gradient_compression_params
         self._initialize(provide_data, provide_label, default_bucket_key)
         self._monitor = None  # type: Optional[mx.monitor.Monitor]
@@ -94,7 +102,7 @@ class TrainingModel(model.SockeyeModel):
         target_length = utils.compute_lengths(target)
         labels = mx.sym.reshape(data=mx.sym.Variable(C.TARGET_LABEL_NAME), shape=(-1,))
 
-        if self.config.reconstruction:
+        if self.reconstruction:
             # reconstructor (backward encoder/decoder)
             self.bw_encoder = self.encoder
             self.bw_decoder = self.decoder
@@ -261,11 +269,11 @@ class TrainingModel(model.SockeyeModel):
                                                              fw_logits,
                                                              bw_logits,
                                                              labels,
-                                                             lm_loss_weight=self._lm_loss_weight)
+                                                             lm_loss_weight=self.lm_loss_weight)
 
             return mx.sym.Group(loss_output), data_names, label_names
 
-        if self.config.reconstruction:
+        if self.reconstruction:
             sym_gen = sym_gen_reconstruction
         else:
             sym_gen = sym_gen_standard
@@ -395,7 +403,7 @@ class TrainingModel(model.SockeyeModel):
         """
         Returns the names of model outputs
         """
-        if self.config.reconstruction and not is_train:
+        if self.reconstruction and not is_train:
             return [C.RECONSTRUCTION_SOFTMAX_OUTPUT_NAME]
         else:
             return [C.SOFTMAX_OUTPUT_NAME]
