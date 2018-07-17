@@ -882,6 +882,7 @@ def train(args: argparse.Namespace):
             lm_args = argparse.Namespace(**vars(args))
             lm_args.weight_tying_type = C.WEIGHT_TYING_SRC_TRG
             lm_args.output_layer_no_bias = False
+            lm_args.decoder_only = True
             lm_config = create_model_config(args=lm_args,
                                             source_vocab_sizes=source_vocab_sizes, target_vocab_size=target_vocab_size,
                                             max_seq_len_source=max_seq_len_source, max_seq_len_target=max_seq_len_target,

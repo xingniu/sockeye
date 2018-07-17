@@ -108,15 +108,15 @@ class TrainingModel(model.SockeyeModel):
             self.bw_decoder = self.decoder
 
             # language model decoder
-            self.lm_decoder = decoder.get_decoder(self.config.config_decoder,
+            self.lm_decoder = decoder.get_decoder(self.lm_config.config_decoder,
                                                   prefix=C.LANGUAGE_MODEL_PREFIX + self.prefix)
             lm_out_weight_target = mx.sym.Variable(C.LANGUAGE_MODEL_PREFIX + self.prefix + "target_output_weight",
-                                                   shape=(self.config.vocab_target_size, self.lm_decoder.get_num_hidden()))
+                                                   shape=(self.lm_config.vocab_target_size, self.lm_decoder.get_num_hidden()))
             self.lm_output_layer = layers.OutputLayer(hidden_size=self.lm_decoder.get_num_hidden(),
-                                                      vocab_size=self.config.vocab_target_size,
+                                                      vocab_size=self.lm_config.vocab_target_size,
                                                       weight=lm_out_weight_target,
-                                                      weight_normalization=self.config.weight_normalization,
-                                                      no_bias=self.config.output_layer_no_bias,
+                                                      weight_normalization=self.lm_config.weight_normalization,
+                                                      no_bias=self.lm_config.output_layer_no_bias,
                                                       prefix=C.LANGUAGE_MODEL_PREFIX + self.prefix + C.DEFAULT_OUTPUT_LAYER_PREFIX)
 
         self.model_loss = loss.get_loss(self.config.config_loss)
