@@ -74,7 +74,7 @@ class TrainingModel(model.SockeyeModel):
                  fixed_param_names: Optional[List[str]] = None,
                  reconstruction: Optional[bool] = False,
                  lm_config: Optional[model.ModelConfig] = None,
-                 lm_loss_weight: Optional[float] = 1.0) -> None:
+                 lm_loss_weight: Optional[float] = 0.5) -> None:
         super().__init__(config)
         self.context = context
         self.output_dir = output_dir
@@ -109,15 +109,15 @@ class TrainingModel(model.SockeyeModel):
 
             # language model decoder
             self.lm_decoder = decoder.get_decoder(self.lm_config.config_decoder,
-                                                  prefix=C.LANGUAGE_MODEL_PREFIX + self.prefix)
-            lm_out_weight_target = mx.sym.Variable(C.LANGUAGE_MODEL_PREFIX + self.prefix + "target_output_weight",
+                                                  prefix=self.prefix + C.LANGUAGE_MODEL_PREFIX)
+            lm_out_weight_target = mx.sym.Variable(self.prefix + C.LANGUAGE_MODEL_PREFIX + "target_output_weight",
                                                    shape=(self.lm_config.vocab_target_size, self.lm_decoder.get_num_hidden()))
             self.lm_output_layer = layers.OutputLayer(hidden_size=self.lm_decoder.get_num_hidden(),
                                                       vocab_size=self.lm_config.vocab_target_size,
                                                       weight=lm_out_weight_target,
                                                       weight_normalization=self.lm_config.weight_normalization,
                                                       no_bias=self.lm_config.output_layer_no_bias,
-                                                      prefix=C.LANGUAGE_MODEL_PREFIX + self.prefix + C.DEFAULT_OUTPUT_LAYER_PREFIX)
+                                                      prefix=self.prefix + C.LANGUAGE_MODEL_PREFIX + C.DEFAULT_OUTPUT_LAYER_PREFIX)
 
         self.model_loss = loss.get_loss(self.config.config_loss)
 
@@ -213,6 +213,16 @@ class TrainingModel(model.SockeyeModel):
                                                                     None,
                                                                     source_encoded_length,
                                                                     target_embed_seq_len)
+#            self.decoder.set_teacher_forcing(True)
+#            # target_decoded: (batch-size, target_seq_len, decoder_depth)
+#            (target_decoded,
+#             target_decoded_length,
+#             target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded,
+#                                                                    source_encoded_length,
+#                                                                    source_encoded_seq_len,
+#                                                                    target_embed,
+#                                                                    target_embed_length,
+#                                                                    target_embed_seq_len)
 
             # fw_decoded: (batch_size * target_seq_len, decoder_depth)
             fw_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
@@ -264,12 +274,17 @@ class TrainingModel(model.SockeyeModel):
             # bw_logits: (batch_size * source_seq_len, source_vocab_size)
             bw_logits = self.output_layer(bw_decoded)
 
-            # computes total loss
-            loss_output = self.model_loss.get_roundtrip_loss(lm_logits,
-                                                             fw_logits,
-                                                             bw_logits,
-                                                             labels,
-                                                             lm_loss_weight=self.lm_loss_weight)
+            # computes losses
+            lm_loss_output = self.model_loss.get_loss(lm_logits,
+                                                      mx.sym.softmax(data=fw_logits),
+                                                      grad_scale=self.lm_loss_weight,
+                                                      prefix=C.LANGUAGE_MODEL_PREFIX)
+            rc_loss_output = self.model_loss.get_loss(bw_logits,
+                                                      labels,
+                                                      grad_scale=1.0-self.lm_loss_weight,
+                                                      prefix=C.RECONSTRUCTION_PREFIX)
+            translation_loss_output = self.model_loss.get_loss(fw_logits, labels)
+            loss_output = lm_loss_output + rc_loss_output + translation_loss_output
 
             return mx.sym.Group(loss_output), data_names, label_names
 
@@ -399,11 +414,11 @@ class TrainingModel(model.SockeyeModel):
         # TODO: Push update to MXNet to expose the optimizer (Module should have a get_optimizer method)
         return self.current_module._optimizer
 
-    def output_names(self, is_train: bool = True) -> List[str]:
+    def metric_output_names(self, is_train: bool = True) -> List[str]:
         """
-        Returns the names of model outputs
+        Returns the names of model outputs for metrics
         """
-        if self.reconstruction and not is_train:
+        if self.reconstruction and is_train:
             return [C.RECONSTRUCTION_SOFTMAX_OUTPUT_NAME]
         else:
             return [C.SOFTMAX_OUTPUT_NAME]
@@ -994,14 +1009,15 @@ class EarlyStoppingTrainer:
                         loss: loss.Loss) -> Tuple[mx.metric.EvalMetric,
                                                   mx.metric.EvalMetric,
                                                   Optional[mx.metric.EvalMetric]]:
-        metric_train = self._create_eval_metric_composite(metrics, self.model.output_names(is_train=True))
-        metric_val = self._create_eval_metric_composite(metrics, self.model.output_names(is_train=False))
+        metric_train = self._create_eval_metric_composite(metrics, self.model.metric_output_names(is_train=True))
+        metric_val = self._create_eval_metric_composite(metrics, self.model.metric_output_names(is_train=False))
         # If optimizer requires it, track loss as metric
         if isinstance(optimizer, SockeyeOptimizer):
             if optimizer.request_optimized_metric:
-                metric_loss = self._create_eval_metric(self.state.early_stopping_metric)
+                metric_loss = self._create_eval_metric(self.state.early_stopping_metric,
+                                                       self.model.metric_output_names(is_train=True))
             else:
-                metric_loss = loss.create_metric(self.model.output_names(is_train=True))
+                metric_loss = loss.create_metric(self.model.metric_output_names(is_train=True))
         else:
             metric_loss = None
         return metric_train, metric_val, metric_loss

@@ -748,7 +748,7 @@ def add_training_args(params):
                                    'This is currently for RNN models only. Default: %(default)s.')
     train_params.add_argument('--lm-loss-weight',
                               type=float,
-                              default=1.0,
+                              default=0.5,
                               help='The weight for language modeling loss in reconstruction training. '
                                    'Default: %(default)s.')
 

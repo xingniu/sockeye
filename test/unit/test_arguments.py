@@ -129,7 +129,7 @@ def test_model_parameters(test_params, expected_params):
 @pytest.mark.parametrize("test_params, expected_params", [
     ('', dict(decoder_only=False,
               reconstruction=False,
-              lm_loss_weight=1.0,
+              lm_loss_weight=0.5,
               batch_size=4096,
               batch_type="word",
               fill_up='replicate',
