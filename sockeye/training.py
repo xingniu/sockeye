@@ -276,14 +276,15 @@ class TrainingModel(model.SockeyeModel):
 
             # computes losses
             lm_loss_output = self.model_loss.get_loss(lm_logits,
-                                                      mx.sym.softmax(data=fw_logits),
+                                                      mx.sym.softmax(fw_logits, axis=1),
+#                                                      mx.sym.argmax(fw_logits, axis=1),
                                                       grad_scale=self.lm_loss_weight,
                                                       prefix=C.LANGUAGE_MODEL_PREFIX)
             rc_loss_output = self.model_loss.get_loss(bw_logits,
                                                       labels,
                                                       grad_scale=1.0-self.lm_loss_weight,
                                                       prefix=C.RECONSTRUCTION_PREFIX)
-            translation_loss_output = self.model_loss.get_loss(fw_logits, labels)
+            translation_loss_output = self.model_loss.get_loss(fw_logits, labels, grad_scale=0)
             loss_output = lm_loss_output + rc_loss_output + translation_loss_output
 
             return mx.sym.Group(loss_output), data_names, label_names
