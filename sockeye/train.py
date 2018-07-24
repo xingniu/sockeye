@@ -114,11 +114,11 @@ def check_arg_compatibility(args: argparse.Namespace):
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Reconstruction training currently supports RNN decoders only.")
         check_condition(args.rnn_num_hidden == args.num_embed[0],
-                        "Source embedding size must match RNN decoder size: %s vs. %s"
+                        "Source embedding size must match RNN decoder size for reconstruction training: %s vs. %s"
                         % (args.rnn_num_hidden, args.num_embed[0]))
         check_condition(args.source == args.target,
-                        "Source and target side of the training data must be the same: %s vs. %s"
-                        % (args.source, args.target))
+                        "Source and target side of the training data must be the same for reconstruction training: "
+                        "%s vs. %s" % (args.source, args.target))
         if not args.weight_tying or args.weight_tying_type != C.WEIGHT_TYING_SRC_TRG_SOFTMAX:
             logger.info("Source embeddings, target embeddings and the target softmax weight matrix "
                         "will be tied when training bidirectional NMT models with reconstruction.")
@@ -126,6 +126,14 @@ def check_arg_compatibility(args: argparse.Namespace):
             args.weight_tying_type = C.WEIGHT_TYING_SRC_TRG_SOFTMAX
     check_condition(not (args.decoder_only and args.reconstruction),
                     "Pre-training the decoder and training the reconstruction model are mutually exclusive.")
+
+    if args.teacher_forcing_probability_reduce_factor != None:
+        check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
+                        "Reducing the teacher forcing probability currently supports RNN decoders only.")
+        check_condition(args.rnn_num_hidden == args.num_embed[1],
+                        "Target embedding size must match the decoder size when reducing "
+                        "the teacher forcing probability: %s vs. %s"
+                        % (args.rnn_num_hidden, args.num_embed[1]))
 
 
 def check_resume(args: argparse.Namespace, output_folder: str) -> bool:
@@ -699,6 +707,7 @@ def create_model_config(args: argparse.Namespace,
                                      weight_tying_type=args.weight_tying_type if args.weight_tying else None,
                                      weight_normalization=args.weight_normalization,
                                      output_layer_no_bias=args.output_layer_no_bias,
+                                     teacher_forcing_probability_reduce_factor=args.teacher_forcing_probability_reduce_factor,
                                      lhuc=args.lhuc is not None)
     return model_config
 

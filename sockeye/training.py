@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import mxnet as mx
 import numpy as np
-from math import sqrt
+from math import sqrt, exp
 
 from . import checkpoint_decoder
 from . import constants as C
@@ -84,6 +84,9 @@ class TrainingModel(model.SockeyeModel):
         self.lm_loss_weight = lm_loss_weight
         self._bucketing = bucketing
         self._gradient_compression_params = gradient_compression_params
+        self._provide_data = provide_data
+        self._provide_label = provide_label
+        self._default_bucket_key = default_bucket_key
         self._initialize(provide_data, provide_label, default_bucket_key)
         self._monitor = None  # type: Optional[mx.monitor.Monitor]
 
@@ -203,26 +206,26 @@ class TrainingModel(model.SockeyeModel):
                                                            source_embed_seq_len)
 
             # forward decoder
-            self.decoder.set_teacher_forcing(False)
-            # target_decoded: (batch-size, target_seq_len, decoder_depth)
-            (target_decoded,
-             target_decoded_length,
-             target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded,
-                                                                    source_encoded_length,
-                                                                    source_encoded_seq_len,
-                                                                    None,
-                                                                    source_encoded_length,
-                                                                    target_embed_seq_len)
-#            self.decoder.set_teacher_forcing(True)
+#            self.decoder.set_teacher_forcing_probability(0.0)
 #            # target_decoded: (batch-size, target_seq_len, decoder_depth)
 #            (target_decoded,
 #             target_decoded_length,
 #             target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded,
 #                                                                    source_encoded_length,
 #                                                                    source_encoded_seq_len,
-#                                                                    target_embed,
-#                                                                    target_embed_length,
+#                                                                    None,
+#                                                                    source_encoded_length,
 #                                                                    target_embed_seq_len)
+            self.decoder.set_teacher_forcing_probability(1.0)
+            # target_decoded: (batch-size, target_seq_len, decoder_depth)
+            (target_decoded,
+             target_decoded_length,
+             target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded,
+                                                                    source_encoded_length,
+                                                                    source_encoded_seq_len,
+                                                                    target_embed,
+                                                                    target_embed_length,
+                                                                    target_embed_seq_len)
 
             # fw_decoded: (batch_size * target_seq_len, decoder_depth)
             fw_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
@@ -233,7 +236,7 @@ class TrainingModel(model.SockeyeModel):
 
             # language model
             # lm_decoded: (batch_size, target_seq_len, lm_decoder_depth)
-            self.lm_decoder.set_teacher_forcing(True)
+            self.lm_decoder.set_teacher_forcing_probability(1.0)
             (lm_decoded, _, _) = self.lm_decoder.decode_sequence(source_encoded,
                                                                  source_encoded_length,
                                                                  source_encoded_seq_len,
@@ -257,7 +260,7 @@ class TrainingModel(model.SockeyeModel):
                                                           target_decoded_seq_len)
 
             # backward decoder
-            self.bw_decoder.set_teacher_forcing(True)
+            self.bw_decoder.set_teacher_forcing_probability(1.0)
             # bw_decoded: (batch_size, source_seq_len, decoder_depth)
             # Assume the provided target is the same as the source
             (bw_decoded, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
@@ -279,12 +282,15 @@ class TrainingModel(model.SockeyeModel):
                                                       mx.sym.softmax(fw_logits, axis=1),
 #                                                      mx.sym.argmax(fw_logits, axis=1),
                                                       grad_scale=self.lm_loss_weight,
+#                                                      grad_scale=0,
                                                       prefix=C.LANGUAGE_MODEL_PREFIX)
             rc_loss_output = self.model_loss.get_loss(bw_logits,
                                                       labels,
                                                       grad_scale=1.0-self.lm_loss_weight,
+#                                                      grad_scale=0,
                                                       prefix=C.RECONSTRUCTION_PREFIX)
             translation_loss_output = self.model_loss.get_loss(fw_logits, labels, grad_scale=0)
+#            translation_loss_output = self.model_loss.get_loss(fw_logits, labels, grad_scale=1)
             loss_output = lm_loss_output + rc_loss_output + translation_loss_output
 
             return mx.sym.Group(loss_output), data_names, label_names
@@ -522,6 +528,24 @@ class TrainingModel(model.SockeyeModel):
         self.module.install_monitor(self._monitor)
         logger.info("Installed MXNet monitor; pattern='%s'; statistics_func='%s'",
                     monitor_pattern, monitor_stat_func_name)
+
+    def adjust_teacher_forcing_probability(self, checkpoint: int) -> bool:
+        """
+        Adjusts the teacher forcing probability if required.
+
+        :param checkpoint: Current checkpoint number.
+        :return: Whether the teacher forcing probability was adjusted.
+        """
+        if self.config.teacher_forcing_probability_reduce_factor != None:
+            tfprf = self.config.teacher_forcing_probability_reduce_factor
+            old_tfp = self.decoder.teacher_forcing_probability
+#            new_tfp = tfprf**checkpoint
+            new_tfp = (tfprf+1)/(tfprf+exp(checkpoint/tfprf))
+            self.decoder.set_teacher_forcing_probability(new_tfp)
+            logger.info("Lowering teacher forcing probability: %1.2e -> %1.2e", old_tfp, new_tfp)
+            self._initialize(self._provide_data, self._provide_label, self._default_bucket_key)
+            return True
+        return False
 
     @property
     def monitor(self) -> Optional[mx.monitor.Monitor]:
@@ -801,6 +825,12 @@ class EarlyStoppingTrainer:
 
                     if stop_fit:
                         break
+
+                # (8) adjust the teacher forcing probability
+                if self.model.adjust_teacher_forcing_probability(self.state.checkpoint):
+                    self._initialize_parameters(existing_parameters, allow_missing_parameters, allow_extra_parameters)
+                    self._initialize_optimizer()
+                    self._load_training_state(train_iter)
 
                 tic = time.time()
 

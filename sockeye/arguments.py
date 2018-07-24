@@ -751,6 +751,17 @@ def add_training_args(params):
                               default=0.5,
                               help='The weight for language modeling loss in reconstruction training. '
                                    'Default: %(default)s.')
+    train_params.add_argument('--teacher-forcing-probability-reduce-factor',
+                              type=float,
+                              default=None,
+                              help='The factor of reducing the teacher forcing probability. '
+                                   'This is currently for training RNN decoders only. Default: %(default)s.')
+#    train_params.add_argument('--teacher-forcing-probability-reduce-type',
+#                              type=str,
+#                              default="scheduled-sampling",
+#                              choices=["scheduled-sampling", "linear-combination"],
+#                              help='The type of reducing the teacher forcing probability. '
+#                                   'This is currently for training RNN decoders only. Default: %(default)s.')
 
     train_params.add_argument('--batch-size', '-b',
                               type=int_greater_or_equal(1),
