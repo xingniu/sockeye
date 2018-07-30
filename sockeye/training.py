@@ -57,9 +57,9 @@ class TrainingModel(model.SockeyeModel):
             unrolled to the full length.
     :param gradient_compression_params: Optional dictionary of gradient compression parameters.
     :param fixed_param_names: Optional list of params to fix during training (i.e. their values will not be trained).
-    :param reconstruction: Fine-tune bidirectional NMT models by reconstructing monolingual data.
+    :param reconstruction: Train or fine-tune bidirectional NMT models by reconstructing the source data.
+    :param reconstruction_loss_weight: The weight for reconstruction loss.
     :param lm_config: Configuration object holding details about the language model.
-    :param lm_loss_weight: The weight for language modeling loss in reconstruction training.
     """
 
     def __init__(self,
@@ -72,16 +72,16 @@ class TrainingModel(model.SockeyeModel):
                  bucketing: bool,
                  gradient_compression_params: Optional[Dict[str, Any]] = None,
                  fixed_param_names: Optional[List[str]] = None,
-                 reconstruction: Optional[bool] = False,
-                 lm_config: Optional[model.ModelConfig] = None,
-                 lm_loss_weight: Optional[float] = 0.5) -> None:
+                 reconstruction: Optional[str] = None,
+                 reconstruction_loss_weight: Optional[float] = 0.5,
+                 lm_config: Optional[model.ModelConfig] = None) -> None:
         super().__init__(config)
         self.context = context
         self.output_dir = output_dir
         self.fixed_param_names = fixed_param_names
         self.reconstruction = reconstruction
+        self.reconstruction_loss_weight = reconstruction_loss_weight
         self.lm_config = lm_config
-        self.lm_loss_weight = lm_loss_weight
         self._bucketing = bucketing
         self._gradient_compression_params = gradient_compression_params
         self._provide_data = provide_data
@@ -105,22 +105,36 @@ class TrainingModel(model.SockeyeModel):
         target_length = utils.compute_lengths(target)
         labels = mx.sym.reshape(data=mx.sym.Variable(C.TARGET_LABEL_NAME), shape=(-1,))
 
-        if self.reconstruction:
+        if self.reconstruction != None:
             # reconstructor (backward encoder/decoder)
             self.bw_encoder = self.encoder
             self.bw_decoder = self.decoder
 
-            # language model decoder
-            self.lm_decoder = decoder.get_decoder(self.lm_config.config_decoder,
-                                                  prefix=self.prefix + C.LANGUAGE_MODEL_PREFIX)
-            lm_out_weight_target = mx.sym.Variable(self.prefix + C.LANGUAGE_MODEL_PREFIX + "target_output_weight",
-                                                   shape=(self.lm_config.vocab_target_size, self.lm_decoder.get_num_hidden()))
-            self.lm_output_layer = layers.OutputLayer(hidden_size=self.lm_decoder.get_num_hidden(),
-                                                      vocab_size=self.lm_config.vocab_target_size,
-                                                      weight=lm_out_weight_target,
-                                                      weight_normalization=self.lm_config.weight_normalization,
-                                                      no_bias=self.lm_config.output_layer_no_bias,
-                                                      prefix=self.prefix + C.LANGUAGE_MODEL_PREFIX + C.DEFAULT_OUTPUT_LAYER_PREFIX)
+            if self.reconstruction == C.BILINGUAL:
+                reconstruction_labels = mx.sym.reshape(data=source_words, shape=(-1,))
+                # reconstruction decoder
+                self.rc_decoder = decoder.get_decoder(self.config.config_decoder,
+                                                      prefix=self.prefix + C.RECONSTRUCTION_PREFIX)
+                rc_out_weight_target = mx.sym.Variable(self.prefix + C.RECONSTRUCTION_PREFIX + "target_output_weight",
+                                                       shape=(self.config.vocab_target_size, self.rc_decoder.get_num_hidden()))
+                self.rc_output_layer = layers.OutputLayer(hidden_size=self.rc_decoder.get_num_hidden(),
+                                                          vocab_size=self.config.vocab_target_size,
+                                                          weight=rc_out_weight_target,
+                                                          weight_normalization=self.config.weight_normalization,
+                                                          no_bias=self.config.output_layer_no_bias,
+                                                          prefix=self.prefix + C.RECONSTRUCTION_PREFIX + C.DEFAULT_OUTPUT_LAYER_PREFIX)
+            elif self.reconstruction == C.MONOLINGUAL:
+                # language model decoder
+                self.lm_decoder = decoder.get_decoder(self.lm_config.config_decoder,
+                                                      prefix=self.prefix + C.LANGUAGE_MODEL_PREFIX)
+                lm_out_weight_target = mx.sym.Variable(self.prefix + C.LANGUAGE_MODEL_PREFIX + "target_output_weight",
+                                                       shape=(self.lm_config.vocab_target_size, self.lm_decoder.get_num_hidden()))
+                self.lm_output_layer = layers.OutputLayer(hidden_size=self.lm_decoder.get_num_hidden(),
+                                                          vocab_size=self.lm_config.vocab_target_size,
+                                                          weight=lm_out_weight_target,
+                                                          weight_normalization=self.lm_config.weight_normalization,
+                                                          no_bias=self.lm_config.output_layer_no_bias,
+                                                          prefix=self.prefix + C.LANGUAGE_MODEL_PREFIX + C.DEFAULT_OUTPUT_LAYER_PREFIX)
 
         self.model_loss = loss.get_loss(self.config.config_loss)
 
@@ -188,114 +202,213 @@ class TrainingModel(model.SockeyeModel):
             source_seq_len, target_seq_len = seq_lens
 
             # source embedding
+            # source_embed: x1 x2 ... xn <EOS>
             (source_embed,
              source_embed_length,
              source_embed_seq_len) = self.embedding_source.encode(source, source_length, source_seq_len)
 
             # target embedding
+            # target_embed (monolingual): <BOS> x1 x2 ... xn
+            # target_embed (bilingual):   <BOS> y1 y2 ... yn
             (target_embed,
              target_embed_length,
              target_embed_seq_len) = self.embedding_target.encode(target, target_length, target_seq_len)
 
             # forward encoder
-            # source_encoded: (batch_size, source_encoded_length, encoder_depth)
-            (source_encoded,
-             source_encoded_length,
-             source_encoded_seq_len) = self.encoder.encode(source_embed,
-                                                           source_embed_length,
-                                                           source_embed_seq_len)
+            # fw_encoded: (batch_size, max_seq_len, encoder_depth)
+            # fw_encoded: x1 x2 ... xn <EOS>
+            # fw_encoded_length = source_length
+            (fw_encoded,
+             fw_encoded_length,
+             fw_encoded_seq_len) = self.encoder.encode(source_embed,
+                                                       source_embed_length,
+                                                       source_embed_seq_len)
 
-            # forward decoder
-#            self.decoder.set_teacher_forcing_probability(0.0)
-#            # target_decoded: (batch-size, target_seq_len, decoder_depth)
-#            (target_decoded,
-#             target_decoded_length,
-#             target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded,
-#                                                                    source_encoded_length,
-#                                                                    source_encoded_seq_len,
-#                                                                    None,
-#                                                                    source_encoded_length,
-#                                                                    target_embed_seq_len)
-            self.decoder.set_teacher_forcing_probability(1.0)
-            # target_decoded: (batch-size, target_seq_len, decoder_depth)
-            (target_decoded,
-             target_decoded_length,
-             target_decoded_seq_len) = self.decoder.decode_sequence(source_encoded,
-                                                                    source_encoded_length,
-                                                                    source_encoded_seq_len,
-                                                                    target_embed,
-                                                                    target_embed_length,
-                                                                    target_embed_seq_len)
-
-            # fw_decoded: (batch_size * target_seq_len, decoder_depth)
-            fw_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
-
-            # forward output layer
-            # fw_logits: (batch_size * target_seq_len, target_vocab_size)
-            fw_logits = self.output_layer(fw_decoded)
-
-            # language model
-            # lm_decoded: (batch_size, target_seq_len, lm_decoder_depth)
-            self.lm_decoder.set_teacher_forcing_probability(1.0)
-            (lm_decoded, _, _) = self.lm_decoder.decode_sequence(source_encoded,
-                                                                 source_encoded_length,
-                                                                 source_encoded_seq_len,
-                                                                 target_decoded,
-                                                                 target_decoded_length,
-                                                                 target_decoded_seq_len)
-
-            # lm_decoded: (batch_size * target_seq_len, lm_decoder_depth)
-            lm_decoded = mx.sym.reshape(data=lm_decoded, shape=(-3, 0))
-
-            # language model output layer
-            # lm_logits: (batch_size * target_seq_len, target_vocab_size)
-            lm_logits = self.lm_output_layer(lm_decoded)
+            # forward decoder (no teacher forcing)
+            self.decoder.set_teacher_forcing_probability(0.0)
+            # fw_decoded: (batch-size, max_seq_len, decoder_depth)
+            # fw_decoded: y1 y2 ... yn <EOS>
+            # fw_decoded_length = max_seq_len
+            (fw_decoded,
+             fw_decoded_length,
+             fw_decoded_seq_len) = self.decoder.decode_sequence(fw_encoded,
+                                                                fw_encoded_length,
+                                                                fw_encoded_seq_len,
+                                                                None,
+                                                                fw_encoded_length,
+                                                                target_embed_seq_len)
 
             # backward encoder
-            # bw_encoded: (batch_size, target_decoded_length, encoder_depth)
+            # bw_encoded: (batch_size, max_seq_len, encoder_depth)
+            # bw_encoded: y1 y2 ... yn <EOS>
+            # bw_encoded_length = max_seq_len
             (bw_encoded,
              bw_encoded_length,
-             bw_encoded_seq_len) = self.bw_encoder.encode(target_decoded,
-                                                          target_decoded_length,
-                                                          target_decoded_seq_len)
+             bw_encoded_seq_len) = self.bw_encoder.encode(fw_decoded,
+                                                          fw_decoded_length,
+                                                          fw_decoded_seq_len)
 
-            # backward decoder
-            self.bw_decoder.set_teacher_forcing_probability(1.0)
-            # bw_decoded: (batch_size, source_seq_len, decoder_depth)
-            # Assume the provided target is the same as the source
-            (bw_decoded, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
-                                                                 bw_encoded_length,
-                                                                 bw_encoded_seq_len,
-                                                                 target_embed,
-                                                                 target_embed_length,
-                                                                 target_embed_seq_len)
+            if self.reconstruction == C.BILINGUAL:
+                ###### Translation ######
+                # forward decoder (teacher forcing)
+                self.decoder.set_teacher_forcing_probability(1.0)
+                # target_decoded: (batch-size, max_seq_len, decoder_depth)
+                # target_decoded: y1 y2 ... yn <EOS>
+                (target_decoded, _, _) = self.decoder.decode_sequence(fw_encoded,
+                                                                      fw_encoded_length,
+                                                                      fw_encoded_seq_len,
+                                                                      target_embed,
+                                                                      target_embed_length,
+                                                                      target_embed_seq_len)
+#                # fw_decoded: y1 y2 ... yn <EOS>
+#                # fw_decoded_length = max_seq_len
+#                (fw_decoded,
+#                 fw_decoded_length,
+#                 fw_decoded_seq_len) = self.decoder.decode_sequence(fw_encoded,
+#                                                                    fw_encoded_length,
+#                                                                    fw_encoded_seq_len,
+#                                                                    target_embed,
+#                                                                    target_embed_length,
+#                                                                    target_embed_seq_len)
+#                fw_decoded_length = target_embed_length
+#                target_decoded = fw_decoded
 
-            # bw_decoded: (batch_size * source_seq_len, decoder_depth)
-            bw_decoded = mx.sym.reshape(data=bw_decoded, shape=(-3, 0))
+                # target_decoded: (batch_size * max_seq_len, decoder_depth)
+                target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
 
-            # backward output layer
-            # bw_logits: (batch_size * source_seq_len, source_vocab_size)
-            bw_logits = self.output_layer(bw_decoded)
+                # output layer
+                # logits: (batch_size * max_seq_len, target_vocab_size)
+                logits = self.output_layer(target_decoded)
 
-            # computes losses
-            lm_loss_output = self.model_loss.get_loss(lm_logits,
-                                                      mx.sym.softmax(fw_logits, axis=1),
-#                                                      mx.sym.argmax(fw_logits, axis=1),
-                                                      grad_scale=self.lm_loss_weight,
-#                                                      grad_scale=0,
-                                                      prefix=C.LANGUAGE_MODEL_PREFIX)
-            rc_loss_output = self.model_loss.get_loss(bw_logits,
-                                                      labels,
-                                                      grad_scale=1.0-self.lm_loss_weight,
-#                                                      grad_scale=0,
-                                                      prefix=C.RECONSTRUCTION_PREFIX)
-            translation_loss_output = self.model_loss.get_loss(fw_logits, labels, grad_scale=0)
-#            translation_loss_output = self.model_loss.get_loss(fw_logits, labels, grad_scale=1)
-            loss_output = lm_loss_output + rc_loss_output + translation_loss_output
+                translation_loss_output = self.model_loss.get_loss(logits,
+                                                                   labels,
+                                                                   grad_scale=1.0-self.reconstruction_loss_weight)
+
+                ###### Reconstruction ######
+                # backward encoder
+                # bw_encoded: (batch_size, max_seq_len, encoder_depth)
+                # bw_encoded: y1 y2 ... yn <EOS>
+                # bw_encoded_length = max_seq_len
+                (bw_encoded,
+                 bw_encoded_length,
+                 bw_encoded_seq_len) = self.bw_encoder.encode(fw_decoded,
+                                                              fw_decoded_length,
+                                                              fw_decoded_seq_len)
+
+                # source_embed_bos_1: <BOS>
+                source_embed_bos_1 = mx.sym.slice(target_embed, begin=(None, 0, None), end=(None, 1, None))
+                # source_embed_bos_2: x1 x2 ... xn <EOS>
+                source_embed_bos_2 = mx.sym.slice(source_embed, begin=(None, 0, None), end=(None, -1, None))
+                # source_embed_bos: <BOS> y1 y2 ... yn <EOS>
+                source_embed_bos = mx.sym.concat(source_embed_bos_1, source_embed_bos_2, dim=1)
+#                source_embed_bos = mx.sym.BlockGrad(source_embed_bos)
+
+                # backward decoder
+                self.bw_decoder.set_teacher_forcing_probability(1.0)
+                # bw_decoded: (batch_size, max_seq_len, decoder_depth)
+                # bw_decoded: x1 x2 ... xn <EOS>
+                (bw_decoded, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
+                                                                     bw_encoded_length,
+                                                                     bw_encoded_seq_len,
+                                                                     source_embed_bos,
+                                                                     source_embed_length,
+                                                                     source_embed_seq_len)
+#                self.rc_decoder.set_teacher_forcing_probability(1.0)
+#                (bw_decoded, _, _) = self.rc_decoder.decode_sequence(fw_decoded,
+#                                                                     fw_decoded_length,
+#                                                                     fw_decoded_seq_len,
+#                                                                     source_embed_bos,
+#                                                                     source_embed_length,
+#                                                                     source_embed_seq_len)
+
+                # bw_decoded: (batch_size * max_seq_len, decoder_depth)
+                bw_decoded = mx.sym.reshape(data=bw_decoded, shape=(-3, 0))
+
+                # backward output layer
+                # bw_logits: (batch_size * max_seq_len, source_vocab_size)
+                bw_logits = self.output_layer(bw_decoded)
+#                bw_logits = self.rc_output_layer(bw_decoded)
+
+                reconstruction_loss_output = self.model_loss.get_loss(bw_logits,
+                                                                      labels=reconstruction_labels,
+                                                                      grad_scale=self.reconstruction_loss_weight,
+                                                                      prefix=C.RECONSTRUCTION_PREFIX)
+
+                loss_output = translation_loss_output + reconstruction_loss_output
+
+            elif self.reconstruction == C.MONOLINGUAL:
+                ###### Language Modeling ######
+                # fw_decoded_bos_1: <BOS>
+                fw_decoded_bos_1 = mx.sym.slice(target_embed, begin=(None, 0, None), end=(None, 1, None))
+                # fw_decoded_bos_2: y1 y2 ... yn <EOS>
+                fw_decoded_bos_2 = mx.sym.slice(fw_decoded, begin=(None, 0, None), end=(None, -1, None))
+                # fw_decoded_bos: <BOS> y1 y2 ... yn <EOS>
+                fw_decoded_bos = mx.sym.concat(fw_decoded_bos_1, fw_decoded_bos_2, dim=1)
+                fw_decoded_bos = mx.sym.BlockGrad(fw_decoded_bos)
+
+                # language model
+                # lm_decoded: (batch_size, max_seq_len, lm_decoder_depth)
+                # lm_decoded: y1 y2 ... yn <EOS>
+                self.lm_decoder.set_teacher_forcing_probability(1.0)
+                (lm_decoded, _, _) = self.lm_decoder.decode_sequence(fw_encoded,
+                                                                     fw_encoded_length,
+                                                                     fw_encoded_seq_len,
+                                                                     fw_decoded_bos,
+                                                                     fw_decoded_length,
+                                                                     fw_decoded_seq_len)
+
+                # lm_decoded: (batch_size * max_seq_len, lm_decoder_depth)
+                lm_decoded = mx.sym.reshape(data=lm_decoded, shape=(-3, 0))
+
+                # language model output layer
+                # lm_logits: (batch_size * max_seq_len, target_vocab_size)
+                lm_logits = self.lm_output_layer(lm_decoded)
+
+                # fw_decoded: (batch_size * max_seq_len, decoder_depth)
+                fw_decoded = mx.sym.reshape(data=fw_decoded, shape=(-3, 0))
+
+                # forward output layer
+                # fw_logits: (batch_size * max_seq_len, target_vocab_size)
+                fw_logits = self.output_layer(fw_decoded)
+
+                language_model_loss_output = self.model_loss.get_loss(lm_logits,
+                                                                      mx.sym.softmax(fw_logits, axis=1),
+#                                                                      mx.sym.argmax(fw_logits, axis=1),
+                                                                      grad_scale=1.0-self.reconstruction_loss_weight,
+                                                                      prefix=C.LANGUAGE_MODEL_PREFIX)
+
+                ###### Reconstruction ######
+                # backward decoder
+                self.bw_decoder.set_teacher_forcing_probability(1.0)
+                # bw_decoded: (batch_size, max_seq_len, decoder_depth)
+                # bw_decoded: x1 x2 ... xn <EOS>
+                (bw_decoded, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
+                                                                     bw_encoded_length,
+                                                                     bw_encoded_seq_len,
+                                                                     target_embed,
+                                                                     target_embed_length,
+                                                                     target_embed_seq_len)
+
+                # bw_decoded: (batch_size * max_seq_len, decoder_depth)
+                bw_decoded = mx.sym.reshape(data=bw_decoded, shape=(-3, 0))
+
+                # backward output layer
+                # bw_logits: (batch_size * max_seq_len, source_vocab_size)
+                bw_logits = self.output_layer(bw_decoded)
+
+                reconstruction_loss_output = self.model_loss.get_loss(bw_logits,
+                                                                      labels,
+                                                                      grad_scale=self.reconstruction_loss_weight,
+                                                                      prefix=C.RECONSTRUCTION_PREFIX)
+
+                ###### Translation ######
+                translation_loss_output = self.model_loss.get_loss(fw_logits, labels, grad_scale=0)
+
+                loss_output = language_model_loss_output + reconstruction_loss_output + translation_loss_output
 
             return mx.sym.Group(loss_output), data_names, label_names
 
-        if self.reconstruction:
+        if self.reconstruction != None:
             sym_gen = sym_gen_reconstruction
         else:
             sym_gen = sym_gen_standard
@@ -342,7 +455,13 @@ class TrainingModel(model.SockeyeModel):
         Runs forward/backward pass and updates training metric(s).
         """
         self.module.forward_backward(batch)
-        self.module.update_metric(metric, batch.label)
+        if self.reconstruction == C.BILINGUAL:
+            source = batch.data[0].split(num_outputs=self.config.config_embed_source.num_factors,
+                                         axis=2, squeeze_axis=True)
+            source = source if self.config.config_embed_source.num_factors == 1 else source[0]
+            self.module.update_metric(metric, [source])
+        else:
+            self.module.update_metric(metric, batch.label)
 
     def update(self):
         """
@@ -425,7 +544,7 @@ class TrainingModel(model.SockeyeModel):
         """
         Returns the names of model outputs for metrics
         """
-        if self.reconstruction and is_train:
+        if self.reconstruction != None and is_train:
             return [C.RECONSTRUCTION_SOFTMAX_OUTPUT_NAME]
         else:
             return [C.SOFTMAX_OUTPUT_NAME]

@@ -110,21 +110,22 @@ def check_arg_compatibility(args: argparse.Namespace):
     if args.decoder_only:
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Decoder pre-training currently supports RNN decoders only.")
-    elif args.reconstruction:
+    elif args.reconstruction != None:
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Reconstruction training currently supports RNN decoders only.")
         check_condition(args.rnn_num_hidden == args.num_embed[0],
                         "Source embedding size must match RNN decoder size for reconstruction training: %s vs. %s"
                         % (args.rnn_num_hidden, args.num_embed[0]))
-        check_condition(args.source == args.target,
-                        "Source and target side of the training data must be the same for reconstruction training: "
-                        "%s vs. %s" % (args.source, args.target))
+        if args.reconstruction == C.MONOLINGUAL:
+            check_condition(args.source == args.target,
+                            "Source and target side of the training data must be the same for reconstructing "
+                            "the monolingual data: %s vs. %s" % (args.source, args.target))
         if not args.weight_tying or args.weight_tying_type != C.WEIGHT_TYING_SRC_TRG_SOFTMAX:
             logger.info("Source embeddings, target embeddings and the target softmax weight matrix "
                         "will be tied when training bidirectional NMT models with reconstruction.")
             args.weight_tying = True
             args.weight_tying_type = C.WEIGHT_TYING_SRC_TRG_SOFTMAX
-    check_condition(not (args.decoder_only and args.reconstruction),
+    check_condition(not (args.decoder_only and args.reconstruction != None),
                     "Pre-training the decoder and training the reconstruction model are mutually exclusive.")
 
     if args.teacher_forcing_probability_reduce_factor != None:
@@ -726,7 +727,7 @@ def create_training_model(config: model.ModelConfig,
     :param output_dir: Output folder.
     :param train_iter: The training data iterator.
     :param args: Arguments as returned by argparse.
-    :param lm_config: The configuration for the language model in reconstruction training.
+    :param lm_config: The configuration for the language model in (monolingual) reconstruction training.
     :return: The training model.
     """
     training_model = training.TrainingModel(config=config,
@@ -739,8 +740,8 @@ def create_training_model(config: model.ModelConfig,
                                             gradient_compression_params=gradient_compression_params(args),
                                             fixed_param_names=args.fixed_param_names,
                                             reconstruction=args.reconstruction,
-                                            lm_config=lm_config,
-                                            lm_loss_weight=args.lm_loss_weight)
+                                            reconstruction_loss_weight=args.reconstruction_loss_weight,
+                                            lm_config=lm_config)
 
     return training_model
 
@@ -887,7 +888,7 @@ def train(args: argparse.Namespace):
         model_config.freeze()
 
         lm_config = None
-        if args.reconstruction:
+        if args.reconstruction == C.MONOLINGUAL:
             lm_args = argparse.Namespace(**vars(args))
             lm_args.weight_tying_type = C.WEIGHT_TYING_SRC_TRG
             lm_args.output_layer_no_bias = False

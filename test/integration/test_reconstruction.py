@@ -23,14 +23,14 @@ _LINE_MAX_LENGTH = 9
 _TEST_MAX_LENGTH = 20
 
 ENCODER_DECODER_SETTINGS = [
-    # Reconstruction - "Vanilla" LSTM encoder-decoder with attention
-    ("--reconstruction --encoder rnn --decoder rnn --num-layers 1 --rnn-cell-type lstm --rnn-num-hidden 16 --num-embed 16 --rnn-attention-type mlp"
+    # Monolingual reconstruction - "Vanilla" LSTM encoder-decoder with attention
+    ("--reconstruction monolingual --encoder rnn --decoder rnn --num-layers 1 --rnn-cell-type lstm --rnn-num-hidden 16 --num-embed 16 --rnn-attention-type mlp"
      " --rnn-attention-num-hidden 16 --batch-size 13 --loss cross-entropy --optimized-metric perplexity --max-updates 10"
      " --checkpoint-frequency 10 --optimizer adam --initial-learning-rate 0.01",
      "--beam-size 2",
      True, False, False),
-    # Reconstruction - "Kitchen sink" LSTM encoder-decoder with attention
-    ("--reconstruction --encoder rnn --decoder rnn --num-layers 4:2 --rnn-cell-type lstm --rnn-num-hidden 16"
+    # Monolingual reconstruction - "Kitchen sink" LSTM encoder-decoder with attention
+    ("--reconstruction monolingual --encoder rnn --decoder rnn --num-layers 4:2 --rnn-cell-type lstm --rnn-num-hidden 16"
      " --rnn-residual-connections"
      " --num-embed 16 --rnn-attention-type coverage --rnn-attention-num-hidden 16"
      " --rnn-attention-use-prev-word --rnn-context-gating --layer-normalization --batch-size 13"

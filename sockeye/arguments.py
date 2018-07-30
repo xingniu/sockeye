@@ -743,14 +743,15 @@ def add_training_args(params):
                                help='Pre-train a decoder. This is currently for RNN decoders only. '
                                     'Default: %(default)s.')
     train_params.add_argument('--reconstruction',
-                              action='store_true',
-                              help='Fine-tune bidirectional NMT models by reconstructing monolingual data. '
+                              type=str,
+                              default=None,
+                              choices=[C.MONOLINGUAL, C.BILINGUAL],
+                              help='Train or fine-tune bidirectional NMT models by reconstructing the source data. '
                                    'This is currently for RNN models only. Default: %(default)s.')
-    train_params.add_argument('--lm-loss-weight',
+    train_params.add_argument('--reconstruction-loss-weight',
                               type=float,
                               default=0.5,
-                              help='The weight for language modeling loss in reconstruction training. '
-                                   'Default: %(default)s.')
+                              help='The weight for reconstruction loss. Default: %(default)s.')
     train_params.add_argument('--teacher-forcing-probability-reduce-factor',
                               type=float,
                               default=None,

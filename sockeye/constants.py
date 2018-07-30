@@ -396,3 +396,7 @@ DATA_INFO = "data.info"
 DATA_CONFIG = "data.config"
 PREPARED_DATA_VERSION_FILE = "data.version"
 PREPARED_DATA_VERSION = 2
+
+# reconstruction
+MONOLINGUAL = "monolingual"
+BILINGUAL = "bilingual"
