@@ -733,6 +733,12 @@ def add_model_parameters(params):
                                    "(and all convolutional weight matrices for CNN decoders). Default: %(default)s.")
     model_params.add_argument('--output-layer-no-bias', action="store_true",
                               help="Ignores the bias in decoder output layers. Default: %(default)s.")
+    model_params.add_argument('--instantiate-hidden',
+                              type=str,
+                              default=None,
+                              choices=C.INSTANTIATING_HIDDEN_CHOICES,
+                              help='Use instantiated hidden states as previous target embeddings. '
+                                   'This is currently for RNN models only. Default: %(default)s.')
 
 
 def add_training_args(params):

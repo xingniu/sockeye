@@ -48,6 +48,7 @@ class ModelConfig(Config):
     :param weight_tying: Enables weight tying if True.
     :param weight_tying_type: Determines which weights get tied. Must be set if weight_tying is enabled.
     :param output_layer_no_bias: Ignores the bias in decoder output layers.
+    :param instantiate_hidden: Use instantiated hidden states as previous target embeddings.
     :param lhuc: LHUC (Vilar 2018) is applied at some part of the model.
     """
 
@@ -64,6 +65,7 @@ class ModelConfig(Config):
                  weight_tying_type: Optional[str] = C.WEIGHT_TYING_TRG_SOFTMAX,
                  weight_normalization: bool = False,
                  output_layer_no_bias: bool = False,
+                 instantiate_hidden: str = None,
                  teacher_forcing_probability_reduce_factor: float = None,
                  lhuc: bool = False) -> None:
         super().__init__()
@@ -79,6 +81,7 @@ class ModelConfig(Config):
         self.weight_tying_type = weight_tying_type
         self.weight_normalization = weight_normalization
         self.output_layer_no_bias = output_layer_no_bias
+        self.instantiate_hidden = instantiate_hidden
         self.teacher_forcing_probability_reduce_factor = teacher_forcing_probability_reduce_factor
         if weight_tying and weight_tying_type is None:
             raise RuntimeError("weight_tying_type must be specified when using weight_tying.")
@@ -133,6 +136,8 @@ class SockeyeModel:
                                                weight_normalization=self.config.weight_normalization,
                                                no_bias=self.config.output_layer_no_bias,
                                                prefix=self.prefix + C.DEFAULT_OUTPUT_LAYER_PREFIX)
+        if self.config.instantiate_hidden != None:
+            self.decoder.set_instantiate_hidden(self.config.instantiate_hidden, self.output_layer, self.embedding_target)
 
         self.params = None  # type: Optional[Dict]
         self.aux_params = None  # type: Optional[Dict]

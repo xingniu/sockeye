@@ -90,6 +90,7 @@ class Decoder(ABC):
         logger.info('{}.{} dtype: {}'.format(self.__module__, self.__class__.__name__, dtype))
         self.dtype = dtype
         self.teacher_forcing_probability = 1.0
+        self.instantiate_hidden = None
 
     @abstractmethod
     def decode_sequence(self,
@@ -206,6 +207,14 @@ class Decoder(ABC):
         otherwise the ground truth is used with teacher_forcing_probability.
         """
         self.teacher_forcing_probability = teacher_forcing_probability
+
+    def set_instantiate_hidden(self, instantiate_hidden, output_layer, embedding_target):
+        """
+        Sets the instantiating method when instantiating hidden states is needed.
+        """
+        self.instantiate_hidden = instantiate_hidden
+        self.output_layer = output_layer
+        self.embedding_target = embedding_target
 
 @Decoder.register(transformer.TransformerConfig, C.TRANSFORMER_DECODER_PREFIX)
 class TransformerDecoder(Decoder):
@@ -623,15 +632,33 @@ class RecurrentDecoder(Decoder):
             # hidden: (batch_size, rnn_num_hidden)
             if self.teacher_forcing_probability == 1.0:
                 word_vec_prev = target_embed[seq_idx]
-            elif self.teacher_forcing_probability == 0.0:
-                word_vec_prev = mx.sym.BlockGrad(state.hidden)
             else:
-                teacher_forcing = mx.sym.uniform(shape=(1,)) < self.teacher_forcing_probability
-                choose_target_embed = mx.sym.broadcast_mul(target_embed[seq_idx], teacher_forcing)
-                choose_state_hidden = mx.sym.broadcast_mul(mx.sym.BlockGrad(state.hidden), 1-teacher_forcing)
-                word_vec_prev = choose_target_embed + choose_state_hidden
-#                word_vec_prev = target_embed[seq_idx] * self.teacher_forcing_probability + \
-#                                mx.sym.BlockGrad(state.hidden) * (1-self.teacher_forcing_probability)
+                hidden_prev = mx.sym.BlockGrad(state.hidden)
+                if self.instantiate_hidden != None:
+                    # logits: (batch_size, vocab_size)
+                    logits = self.output_layer(hidden_prev)
+                    if self.instantiate_hidden == C.ARGMAX_NAME:
+                        word_prev = mx.sym.argmax(logits, axis=1, keepdims=True)
+                    elif self.instantiate_hidden == C.SOFTMAX_NAME:
+                        # word_prev_dist: (batch_size, vocab_size)
+                        word_prev_dist = mx.sym.softmax(logits, axis=1)
+                        word_prev = mx.sym.sample_multinomial(word_prev_dist, shape=(1))
+                    elif self.instantiate_hidden == C.GUMBEL_SOFTMAX_NAME:
+                        pass
+                    # word_prev: (batch_size, 1)
+                    hidden_word_vec_prev, _, _ = self.embedding_target.encode(data=word_prev, data_length=None, seq_len=1)
+                    hidden_word_vec_prev = mx.sym.squeeze(hidden_word_vec_prev, axis=1)
+                else:
+                    hidden_word_vec_prev = hidden_prev
+                if self.teacher_forcing_probability == 0.0:
+                    word_vec_prev = hidden_word_vec_prev
+                else:
+                    teacher_forcing = mx.sym.uniform(shape=(1,)) < self.teacher_forcing_probability
+                    choose_target_embed = mx.sym.broadcast_mul(target_embed[seq_idx], teacher_forcing)
+                    choose_state_hidden = mx.sym.broadcast_mul(hidden_word_vec_prev, 1-teacher_forcing)
+                    word_vec_prev = choose_target_embed + choose_state_hidden
+#                    word_vec_prev = target_embed[seq_idx] * self.teacher_forcing_probability + \
+#                                    mx.sym.BlockGrad(state.hidden) * (1-self.teacher_forcing_probability)
             state, attention_state = self._step(word_vec_prev,
                                                 state,
                                                 attention_func,

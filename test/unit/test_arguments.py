@@ -111,6 +111,7 @@ def test_device_args(test_params, expected_params):
               layer_normalization=False,
               weight_normalization=False,
               output_layer_no_bias=False,
+              instantiate_hidden=None,
               lhuc=None,
               encoder=C.TRANSFORMER_TYPE,
               conv_embed_max_filter_width=8,

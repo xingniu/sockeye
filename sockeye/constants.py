@@ -400,3 +400,8 @@ PREPARED_DATA_VERSION = 2
 # reconstruction
 MONOLINGUAL = "monolingual"
 BILINGUAL = "bilingual"
+
+# instantiating hidden states
+ARGMAX_NAME = "argmax"
+GUMBEL_SOFTMAX_NAME = "gumbel-softmax"
+INSTANTIATING_HIDDEN_CHOICES = [ARGMAX_NAME, SOFTMAX_NAME, GUMBEL_SOFTMAX_NAME]
