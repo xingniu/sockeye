@@ -23,15 +23,35 @@ _LINE_MAX_LENGTH = 9
 _TEST_MAX_LENGTH = 20
 
 ENCODER_DECODER_SETTINGS = [
-    # Monolingual reconstruction - "Vanilla" LSTM encoder-decoder with attention
-    ("--reconstruction monolingual --encoder rnn --decoder rnn --num-layers 1 --rnn-cell-type lstm --rnn-num-hidden 16 --num-embed 16 --rnn-attention-type mlp"
-     " --rnn-attention-num-hidden 16 --batch-size 13 --loss cross-entropy --optimized-metric perplexity --max-updates 10"
+    # Monolingual reconstruction - "vanilla" LSTM encoder-decoder with attention
+    ("--reconstruction monolingual --encoder rnn --decoder rnn --num-layers 1 --rnn-cell-type lstm --rnn-num-hidden 16"
+     " --num-embed 16 --rnn-attention-type mlp --rnn-attention-num-hidden 16 --batch-size 13 --loss cross-entropy"
+     " --optimized-metric perplexity --max-updates 10 --checkpoint-frequency 10 --optimizer adam --initial-learning-rate 0.01",
+     "--beam-size 2",
+     True, False, False),
+    # Monolingual reconstruction - "kitchen sink" LSTM encoder-decoder with attention
+    ("--reconstruction monolingual --encoder rnn --decoder rnn --num-layers 4:2 --rnn-cell-type lstm --rnn-num-hidden 16"
+     " --rnn-residual-connections"
+     " --num-embed 16 --rnn-attention-type coverage --rnn-attention-num-hidden 16"
+     " --rnn-attention-use-prev-word --rnn-context-gating --layer-normalization --batch-size 13"
+     " --loss cross-entropy --label-smoothing 0.1 --loss-normalization-type batch --optimized-metric perplexity"
+     " --max-updates 10 --checkpoint-frequency 10 --optimizer adam --initial-learning-rate 0.01"
+     " --rnn-dropout-inputs 0.5:0.1 --rnn-dropout-states 0.5:0.1 --embed-dropout 0.1 --rnn-decoder-hidden-dropout 0.01"
+     " --rnn-decoder-state-init avg --rnn-encoder-reverse-input --rnn-dropout-recurrent 0.1:0.0"
+     " --rnn-h2h-init orthogonal_stacked"
+     " --learning-rate-decay-param-reset --weight-normalization",
+     "--beam-size 2",
+     False, False, False),
+    # Monolingual reconstruction with instantiated hidden states - "vanilla" LSTM encoder-decoder with attention
+    ("--reconstruction monolingual --instantiate-hidden gumbel-softmax --encoder rnn --decoder rnn --num-layers 1"
+     " --rnn-cell-type lstm --rnn-num-hidden 16 --num-embed 16 --rnn-attention-type mlp --rnn-attention-num-hidden 16"
+     " --batch-size 13 --loss cross-entropy --optimized-metric perplexity --max-updates 10"
      " --checkpoint-frequency 10 --optimizer adam --initial-learning-rate 0.01",
      "--beam-size 2",
      True, False, False),
-    # Monolingual reconstruction - "Kitchen sink" LSTM encoder-decoder with attention
-    ("--reconstruction monolingual --encoder rnn --decoder rnn --num-layers 4:2 --rnn-cell-type lstm --rnn-num-hidden 16"
-     " --rnn-residual-connections"
+    # Monolingual reconstruction with instantiated hidden states - "kitchen sink" LSTM encoder-decoder with attention
+    ("--reconstruction monolingual --instantiate-hidden gumbel-softmax --gumbel-softmax-temperature 5.0 --encoder rnn"
+     " --decoder rnn --num-layers 4:2 --rnn-cell-type lstm --rnn-num-hidden 16 --rnn-residual-connections"
      " --num-embed 16 --rnn-attention-type coverage --rnn-attention-num-hidden 16"
      " --rnn-attention-use-prev-word --rnn-context-gating --layer-normalization --batch-size 13"
      " --loss cross-entropy --label-smoothing 0.1 --loss-normalization-type batch --optimized-metric perplexity"

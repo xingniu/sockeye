@@ -129,6 +129,8 @@ def check_arg_compatibility(args: argparse.Namespace):
                     "Pre-training the decoder and training the reconstruction model are mutually exclusive.")
 
     if args.teacher_forcing_probability_reduce_factor != None:
+        check_condition(args.reconstruction == C.BILINGUAL,
+                        "Teacher forcing can only be used in bilingual mode.")
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Reducing the teacher forcing probability currently supports RNN decoders only.")
         check_condition(args.rnn_num_hidden == args.num_embed[1],
@@ -713,6 +715,7 @@ def create_model_config(args: argparse.Namespace,
                                      weight_normalization=args.weight_normalization,
                                      output_layer_no_bias=args.output_layer_no_bias,
                                      instantiate_hidden=args.instantiate_hidden,
+                                     gumbel_softmax_temperature=args.gumbel_softmax_temperature,
                                      teacher_forcing_probability_reduce_factor=args.teacher_forcing_probability_reduce_factor,
                                      lhuc=args.lhuc is not None)
     return model_config
