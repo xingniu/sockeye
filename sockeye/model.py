@@ -136,7 +136,7 @@ class SockeyeModel:
                                                weight_normalization=self.config.weight_normalization,
                                                no_bias=self.config.output_layer_no_bias,
                                                prefix=self.prefix + C.DEFAULT_OUTPUT_LAYER_PREFIX)
-        if self.config.instantiate_hidden != None:
+        if self.config.instantiate_hidden is not None:
             self.decoder.set_instantiate_hidden(self.config.instantiate_hidden, self.output_layer, self.embedding_target)
 
         self.params = None  # type: Optional[Dict]

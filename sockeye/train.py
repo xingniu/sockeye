@@ -110,7 +110,7 @@ def check_arg_compatibility(args: argparse.Namespace):
     if args.decoder_only:
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Decoder pre-training currently supports RNN decoders only.")
-    elif args.reconstruction != None:
+    elif args.reconstruction is not None:
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Reconstruction training currently supports RNN decoders only.")
         check_condition(args.rnn_num_hidden == args.num_embed[0],
@@ -125,10 +125,10 @@ def check_arg_compatibility(args: argparse.Namespace):
                         "will be tied when training bidirectional NMT models with reconstruction.")
             args.weight_tying = True
             args.weight_tying_type = C.WEIGHT_TYING_SRC_TRG_SOFTMAX
-    check_condition(not (args.decoder_only and args.reconstruction != None),
+    check_condition(not (args.decoder_only and args.reconstruction is not None),
                     "Pre-training the decoder and training the reconstruction model are mutually exclusive.")
 
-    if args.teacher_forcing_probability_reduce_factor != None:
+    if args.teacher_forcing_probability_reduce_factor is not None:
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Reducing the teacher forcing probability currently supports RNN decoders only.")
         check_condition(args.rnn_num_hidden == args.num_embed[1],
@@ -136,7 +136,7 @@ def check_arg_compatibility(args: argparse.Namespace):
                         "the teacher forcing probability: %s vs. %s"
                         % (args.rnn_num_hidden, args.num_embed[1]))
 
-    if args.instantiate_hidden != None:
+    if args.instantiate_hidden is not None:
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Instantiating hidden states currently supports RNN decoders only.")
 

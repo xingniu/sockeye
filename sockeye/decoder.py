@@ -634,7 +634,7 @@ class RecurrentDecoder(Decoder):
                 word_vec_prev = target_embed[seq_idx]
             else:
                 hidden_prev = mx.sym.BlockGrad(state.hidden)
-                if self.instantiate_hidden != None:
+                if self.instantiate_hidden is not None:
                     # logits: (batch_size, vocab_size)
                     logits = self.output_layer(hidden_prev)
                     if self.instantiate_hidden == C.ARGMAX_NAME:
