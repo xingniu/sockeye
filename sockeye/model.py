@@ -66,6 +66,7 @@ class ModelConfig(Config):
                  weight_normalization: bool = False,
                  output_layer_no_bias: bool = False,
                  instantiate_hidden: str = None,
+                 gumbel_softmax_temperature: float = 1.0,
                  teacher_forcing_probability_reduce_factor: float = None,
                  lhuc: bool = False) -> None:
         super().__init__()
@@ -82,6 +83,7 @@ class ModelConfig(Config):
         self.weight_normalization = weight_normalization
         self.output_layer_no_bias = output_layer_no_bias
         self.instantiate_hidden = instantiate_hidden
+        self.gumbel_softmax_temperature = gumbel_softmax_temperature
         self.teacher_forcing_probability_reduce_factor = teacher_forcing_probability_reduce_factor
         if weight_tying and weight_tying_type is None:
             raise RuntimeError("weight_tying_type must be specified when using weight_tying.")
@@ -136,8 +138,12 @@ class SockeyeModel:
                                                weight_normalization=self.config.weight_normalization,
                                                no_bias=self.config.output_layer_no_bias,
                                                prefix=self.prefix + C.DEFAULT_OUTPUT_LAYER_PREFIX)
+
         if self.config.instantiate_hidden is not None:
-            self.decoder.set_instantiate_hidden(self.config.instantiate_hidden, self.output_layer, self.embedding_target)
+            self.decoder.set_instantiate_hidden(self.config.instantiate_hidden,
+                                                self.output_layer,
+                                                self.embedding_target,
+                                                gumbel_softmax_temperature=self.config.gumbel_softmax_temperature)
 
         self.params = None  # type: Optional[Dict]
         self.aux_params = None  # type: Optional[Dict]

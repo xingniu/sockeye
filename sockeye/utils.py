@@ -885,3 +885,8 @@ def split(data: mx.nd.NDArray,
     if num_outputs == 1:
         return [ndarray_or_list]
     return ndarray_or_list
+
+
+def gumbel_softmax(logits: mx.sym.Symbol, temperature: float, eps: float = 1e-20, axis: int = 0):
+    gumbel_noise = - mx.sym.log(- mx.sym.log(mx.sym.uniform(low=0, high=1) + eps) + eps)
+    return mx.sym.softmax((logits + gumbel_noise) / temperature, axis=axis)

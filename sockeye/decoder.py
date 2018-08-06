@@ -91,6 +91,7 @@ class Decoder(ABC):
         self.dtype = dtype
         self.teacher_forcing_probability = 1.0
         self.instantiate_hidden = None
+        self.gumbel_softmax_temperature = 1.0
 
     @abstractmethod
     def decode_sequence(self,
@@ -208,13 +209,18 @@ class Decoder(ABC):
         """
         self.teacher_forcing_probability = teacher_forcing_probability
 
-    def set_instantiate_hidden(self, instantiate_hidden, output_layer, embedding_target):
+    def set_instantiate_hidden(self,
+                               instantiate_hidden: str,
+                               output_layer: layers.OutputLayer,
+                               embedding_target: encoder.Embedding,
+                               gumbel_softmax_temperature: float = 1.0):
         """
         Sets the instantiating method when instantiating hidden states is needed.
         """
         self.instantiate_hidden = instantiate_hidden
         self.output_layer = output_layer
         self.embedding_target = embedding_target
+        self.gumbel_softmax_temperature = gumbel_softmax_temperature
 
 @Decoder.register(transformer.TransformerConfig, C.TRANSFORMER_DECODER_PREFIX)
 class TransformerDecoder(Decoder):
@@ -624,51 +630,78 @@ class RecurrentDecoder(Decoder):
         # layer_states: List[(batch_size, state_num_hidden]
         state = self.get_initial_state(source_encoded, source_encoded_lengths)
 
+        # hidden_word_vec_prev: (batch_size, rnn_num_hidden)
+        hidden_word_vec_prev = state.hidden
+
         # hidden_all: target_embed_max_length * (batch_size, rnn_num_hidden)
         hidden_states = []  # type: List[mx.sym.Symbol]
+        output_embeddings = [] # type: List[mx.sym.Symbol]
         # TODO: possible alternative: feed back the context vector instead of the hidden (see lamtram)
         self.reset()
         for seq_idx in range(target_embed_max_length):
-            # hidden: (batch_size, rnn_num_hidden)
+            # word_vec_prev: (batch_size, rnn_num_hidden)
             if self.teacher_forcing_probability == 1.0:
                 word_vec_prev = target_embed[seq_idx]
+            elif self.teacher_forcing_probability == 0.0:
+                word_vec_prev = hidden_word_vec_prev
             else:
-                hidden_prev = mx.sym.BlockGrad(state.hidden)
-                if self.instantiate_hidden is not None:
-                    # logits: (batch_size, vocab_size)
-                    logits = self.output_layer(hidden_prev)
-                    if self.instantiate_hidden == C.ARGMAX_NAME:
-                        word_prev = mx.sym.argmax(logits, axis=1, keepdims=True)
-                    elif self.instantiate_hidden == C.SOFTMAX_NAME:
-                        # word_prev_dist: (batch_size, vocab_size)
-                        word_prev_dist = mx.sym.softmax(logits, axis=1)
-                        word_prev = mx.sym.sample_multinomial(word_prev_dist, shape=(1))
-                    elif self.instantiate_hidden == C.GUMBEL_SOFTMAX_NAME:
-                        pass
-                    # word_prev: (batch_size, 1)
-                    hidden_word_vec_prev, _, _ = self.embedding_target.encode(data=word_prev, data_length=None, seq_len=1)
-                    hidden_word_vec_prev = mx.sym.squeeze(hidden_word_vec_prev, axis=1)
-                else:
-                    hidden_word_vec_prev = hidden_prev
-                if self.teacher_forcing_probability == 0.0:
-                    word_vec_prev = hidden_word_vec_prev
-                else:
-                    teacher_forcing = mx.sym.uniform(shape=(1,)) < self.teacher_forcing_probability
-                    choose_target_embed = mx.sym.broadcast_mul(target_embed[seq_idx], teacher_forcing)
-                    choose_state_hidden = mx.sym.broadcast_mul(hidden_word_vec_prev, 1-teacher_forcing)
-                    word_vec_prev = choose_target_embed + choose_state_hidden
-#                    word_vec_prev = target_embed[seq_idx] * self.teacher_forcing_probability + \
-#                                    mx.sym.BlockGrad(state.hidden) * (1-self.teacher_forcing_probability)
+                teacher_forcing = mx.sym.uniform(shape=(1,)) < self.teacher_forcing_probability
+                choose_target_embed = mx.sym.broadcast_mul(target_embed[seq_idx], teacher_forcing)
+                choose_state_hidden = mx.sym.broadcast_mul(hidden_word_vec_prev, 1-teacher_forcing)
+                word_vec_prev = choose_target_embed + choose_state_hidden
+#                word_vec_prev = target_embed[seq_idx] * self.teacher_forcing_probability + \
+#                                mx.sym.BlockGrad(state.hidden) * (1-self.teacher_forcing_probability)
+
             state, attention_state = self._step(word_vec_prev,
                                                 state,
                                                 attention_func,
                                                 attention_state,
                                                 seq_idx,
                                                 enc_last_hidden=enc_last_hidden)
+
+            # update hidden_word_vec_prev: (batch_size, rnn_num_hidden)
+            if self.teacher_forcing_probability < 1.0:
+                hidden_prev = mx.sym.BlockGrad(state.hidden)
+                if self.instantiate_hidden is None:
+                    hidden_word_vec_prev = hidden_prev
+                else:
+                    if self.instantiate_hidden == C.ARGMAX_NAME:
+                        # logits: (batch_size, vocab_size)
+                        logits = self.output_layer(hidden_prev)
+                        # word_prev: (batch_size, 1)
+                        word_prev = mx.sym.argmax(logits, axis=1, keepdims=True)
+                        # hidden_word_vec_prev: (batch_size, 1, rnn_num_hidden)
+                        hidden_word_vec_prev, _, _ = self.embedding_target.encode(data=word_prev, data_length=None, seq_len=1)
+                        # hidden_word_vec_prev: (batch_size, rnn_num_hidden)
+                        hidden_word_vec_prev = mx.sym.squeeze(hidden_word_vec_prev, axis=1)
+                    elif self.instantiate_hidden == C.SOFTMAX_NAME:
+                        # logits: (batch_size, vocab_size)
+                        logits = self.output_layer(hidden_prev)
+                        # word_prev_dist: (batch_size, vocab_size)
+                        word_prev_dist = mx.sym.softmax(logits, axis=1)
+                        # word_prev: (batch_size, 1)
+                        word_prev = mx.sym.sample_multinomial(word_prev_dist, shape=(1))
+                        # hidden_word_vec_prev: (batch_size, 1, rnn_num_hidden)
+                        hidden_word_vec_prev, _, _ = self.embedding_target.encode(data=word_prev, data_length=None, seq_len=1)
+                        # hidden_word_vec_prev: (batch_size, rnn_num_hidden)
+                        hidden_word_vec_prev = mx.sym.squeeze(hidden_word_vec_prev, axis=1)
+                    elif self.instantiate_hidden == C.GUMBEL_SOFTMAX_NAME:
+                        # logits: (batch_size, vocab_size)
+                        logits = self.output_layer(state.hidden)
+                        # word_prev_dist: (batch_size, vocab_size)
+                        word_prev_dist = utils.gumbel_softmax(logits, temperature=self.gumbel_softmax_temperature, axis=1)
+                        # output_embedding: (batch_size, rnn_num_hidden)
+                        output_embedding = mx.sym.dot(word_prev_dist, self.embedding_target.embed_weight)
+                        output_embeddings.append(output_embedding)
+                        hidden_word_vec_prev = mx.sym.BlockGrad(output_embedding)
+
             hidden_states.append(state.hidden)
 
         # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
-        target_hidden = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
+        if output_embeddings:
+            target_hidden = mx.sym.stack(*output_embeddings, axis=1, name='%shidden_stack' % self.prefix)
+        else:
+            target_hidden = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
         # lengths: (batch_size,)
         lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
 
