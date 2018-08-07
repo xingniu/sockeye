@@ -740,7 +740,8 @@ def add_model_parameters(params):
                               help='Use instantiated hidden states as previous target embeddings. '
                                    'This is currently for RNN models only. Default: %(default)s.')
     model_params.add_argument('--gumbel-softmax-temperature',
-                              type=float, default=1.0,
+                              type=float,
+                              default=1.0,
                               help='The temperature (tau) in Gumbel Softmax function. Default: %(default)s.')
 
 

@@ -887,6 +887,19 @@ def split(data: mx.nd.NDArray,
     return ndarray_or_list
 
 
-def gumbel_softmax(logits: mx.sym.Symbol, temperature: float, eps: float = 1e-20, axis: int = 0):
-    gumbel_noise = - mx.sym.log(- mx.sym.log(mx.sym.uniform(low=0, high=1) + eps) + eps)
+def gumbel_softmax(logits: mx.sym.Symbol,
+                   axis: int = 0,
+                   temperature: float = 1.0,
+                   eps: float = 1e-20) -> mx.sym.Symbol:
+    """
+    Sample categories from the Gumbel-Softmax distribution.
+    Categorical reparameterization with Gumbel-Softmax (https://arxiv.org/abs/1611.01144)
+
+    :param logits: Unnormalized log-probs.
+    :param axis: Axis along which to calculate softmax.
+    :param temperature: Gumbel-Softmax temperature (non-negative scalar).
+    :param eps: Parameter for Gumbel distribution.
+    :return: Sample distribution over categories.
+    """
+    gumbel_noise = -mx.sym.log(-mx.sym.log(mx.sym.uniform() + eps) + eps)
     return mx.sym.softmax((logits + gumbel_noise) / temperature, axis=axis)

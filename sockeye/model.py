@@ -140,9 +140,9 @@ class SockeyeModel:
                                                prefix=self.prefix + C.DEFAULT_OUTPUT_LAYER_PREFIX)
 
         if self.config.instantiate_hidden is not None:
-            self.decoder.set_instantiate_hidden(self.config.instantiate_hidden,
-                                                self.output_layer,
-                                                self.embedding_target,
+            self.decoder.set_instantiate_hidden(instantiate_hidden=self.config.instantiate_hidden,
+                                                output_layer=self.output_layer,
+                                                embedding_target=self.embedding_target,
                                                 gumbel_softmax_temperature=self.config.gumbel_softmax_temperature)
 
         self.params = None  # type: Optional[Dict]
