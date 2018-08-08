@@ -675,7 +675,7 @@ class RecurrentDecoder(Decoder):
                                                                                       seq_len=1)
                         # word_vec_prev_prediction: (batch_size, rnn_num_hidden)
                         word_vec_prev_prediction = mx.sym.squeeze(word_vec_prev_prediction, axis=1)
-                    elif self.instantiate_hidden == C.SOFTMAX_NAME:
+                    elif self.instantiate_hidden == C.SOFTMAX_SAMPLE_NAME:
                         # word_prev_dist: (batch_size, vocab_size)
                         word_prev_dist = mx.sym.softmax(logits, axis=1)
                         # word_prev_prediction: (batch_size, 1)
@@ -686,6 +686,11 @@ class RecurrentDecoder(Decoder):
                                                                                       seq_len=1)
                         # word_vec_prev_prediction: (batch_size, rnn_num_hidden)
                         word_vec_prev_prediction = mx.sym.squeeze(word_vec_prev_prediction, axis=1)
+                    elif self.instantiate_hidden == C.SOFTMAX_NAME:
+                        # word_prev_dist: (batch_size, vocab_size)
+                        word_prev_dist = mx.sym.softmax(logits, axis=1)
+                        # word_vec_prev_prediction: (batch_size, rnn_num_hidden)
+                        word_vec_prev_prediction = mx.sym.dot(word_prev_dist, self.embedding_target.embed_weight)
                     elif self.instantiate_hidden == C.GUMBEL_SOFTMAX_NAME:
                         # word_prev_dist: (batch_size, vocab_size)
                         word_prev_dist = utils.gumbel_softmax(logits, temperature=self.gumbel_softmax_temperature, axis=1)
