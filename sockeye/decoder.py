@@ -91,6 +91,7 @@ class Decoder(ABC):
         self.dtype = dtype
         self.teacher_forcing_probability = 1.0
         self.instantiate_hidden = None
+        self.decode_sequence_as_instantiated_hidden = False
         self.gumbel_softmax_temperature = 1.0
 
     @abstractmethod
@@ -100,7 +101,7 @@ class Decoder(ABC):
                         source_encoded_max_length: int,
                         target_embed: mx.sym.Symbol,
                         target_embed_lengths: mx.sym.Symbol,
-                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int, mx.sym.Symbol]:
+                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int]:
         """
         Decodes a sequence of embedded target words and returns sequence of last decoder
         representations for each time step.
@@ -261,7 +262,7 @@ class TransformerDecoder(Decoder):
                         source_encoded_max_length: int,
                         target_embed: mx.sym.Symbol,
                         target_embed_lengths: mx.sym.Symbol,
-                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int, mx.sym.Symbol]:
+                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int]:
         """
         Decodes a sequence of embedded target words and returns sequence of last decoder
         representations for each time step.
@@ -303,7 +304,7 @@ class TransformerDecoder(Decoder):
         # lengths: (batch_size,)
         lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
 
-        return target, lengths, target_embed_max_length, None
+        return target, lengths, target_embed_max_length
 
     def decode_step(self,
                     step: int,
@@ -594,7 +595,7 @@ class RecurrentDecoder(Decoder):
                         source_encoded_max_length: int,
                         target_embed: mx.sym.Symbol,
                         target_embed_lengths: mx.sym.Symbol,
-                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int, mx.sym.Symbol]:
+                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int]:
         """
         Decodes a sequence of embedded target words and returns sequence of last decoder
         representations for each time step.
@@ -633,7 +634,6 @@ class RecurrentDecoder(Decoder):
         word_vec_prev_prediction = target_embed[0]
         # hidden_all: target_embed_max_length * (batch_size, rnn_num_hidden)
         hidden_states = []  # type: List[mx.sym.Symbol]
-        output_embeddings = [] # type: List[mx.sym.Symbol]
         # TODO: possible alternative: feed back the context vector instead of the hidden (see lamtram)
         self.reset()
         for seq_idx in range(target_embed_max_length):
@@ -644,7 +644,9 @@ class RecurrentDecoder(Decoder):
             elif self.teacher_forcing_probability == 0.0:
                 word_vec_prev = word_vec_prev_prediction
             else:
-                teacher_forcing = mx.sym.uniform(shape=(1,)) < self.teacher_forcing_probability
+                teacher_forcing = mx.sym.random_uniform(shape=(1,)) < self.teacher_forcing_probability
+#                teacher_forcing = mx.sym.random_uniform() < self.teacher_forcing_probability
+#                teacher_forcing = teacher_forcing + mx.sym.zeros_like(word_vec_prev_prediction.slice_axis(axis=1, begin=0, end=1))
                 choose_target_embed = mx.sym.broadcast_mul(target_embed[seq_idx], teacher_forcing)
                 choose_state_hidden = mx.sym.broadcast_mul(word_vec_prev_prediction, 1-teacher_forcing)
                 word_vec_prev = choose_target_embed + choose_state_hidden
@@ -696,19 +698,18 @@ class RecurrentDecoder(Decoder):
                         word_prev_dist = utils.gumbel_softmax(logits, temperature=self.gumbel_softmax_temperature, axis=1)
                         # word_vec_prev_prediction: (batch_size, rnn_num_hidden)
                         word_vec_prev_prediction = mx.sym.dot(word_prev_dist, self.embedding_target.embed_weight)
-                    output_embeddings.append(word_vec_prev_prediction)
-            hidden_states.append(state.hidden)
+
+            if self.decode_sequence_as_instantiated_hidden:
+                hidden_states.append(word_vec_prev_prediction)
+            else:
+                hidden_states.append(state.hidden)
 
         # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
         target_hidden = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
         # lengths: (batch_size,)
         lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
 
-        if output_embeddings:
-            target_embedding = mx.sym.stack(*output_embeddings, axis=1, name='%sembedding_stack' % self.prefix)
-            return target_hidden, lengths, target_embed_max_length, target_embedding
-        else:
-            return target_hidden, lengths, target_embed_max_length, None
+        return target_hidden, lengths, target_embed_max_length
 
     def decode_step(self,
                     step: int,
@@ -1123,7 +1124,7 @@ class ConvolutionalDecoder(Decoder):
                         source_encoded_max_length: int,
                         target_embed: mx.sym.Symbol,
                         target_embed_lengths: mx.sym.Symbol,
-                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int, mx.sym.Symbol]:
+                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int]:
         """
         Decodes a sequence of embedded target words and returns sequence of last decoder
         representations for each time step.
@@ -1147,7 +1148,7 @@ class ConvolutionalDecoder(Decoder):
         # lengths: (batch_size,)
         lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
 
-        return target_hidden, lengths, target_embed_max_length, None
+        return target_hidden, lengths, target_embed_max_length
 
     def _decode(self,
                 source_encoded: mx.sym.Symbol,

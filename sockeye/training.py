@@ -60,6 +60,8 @@ class TrainingModel(model.SockeyeModel):
     :param reconstruction: Train or fine-tune bidirectional NMT models by reconstructing the source data.
     :param reconstruction_loss_weight: The weight for reconstruction loss.
     :param lm_config: Configuration object holding details about the language model.
+    :param instantiate_hidden: Use instantiated hidden states as previous target embeddings.
+    :param teacher_forcing_probability_reduce_factor: The factor of reducing the teacher forcing probability.
     """
 
     def __init__(self,
@@ -74,7 +76,9 @@ class TrainingModel(model.SockeyeModel):
                  fixed_param_names: Optional[List[str]] = None,
                  reconstruction: Optional[str] = None,
                  reconstruction_loss_weight: Optional[float] = 0.5,
-                 lm_config: Optional[model.ModelConfig] = None) -> None:
+                 lm_config: Optional[model.ModelConfig] = None,
+                 instantiate_hidden: str = None,
+                 teacher_forcing_probability_reduce_factor: float = None) -> None:
         super().__init__(config)
         self.context = context
         self.output_dir = output_dir
@@ -82,6 +86,8 @@ class TrainingModel(model.SockeyeModel):
         self.reconstruction = reconstruction
         self.reconstruction_loss_weight = reconstruction_loss_weight
         self.lm_config = lm_config
+        self.instantiate_hidden = instantiate_hidden
+        self.teacher_forcing_probability_reduce_factor = teacher_forcing_probability_reduce_factor
         self._bucketing = bucketing
         self._gradient_compression_params = gradient_compression_params
         self._provide_data = provide_data
@@ -105,6 +111,12 @@ class TrainingModel(model.SockeyeModel):
         target_length = utils.compute_lengths(target)
         labels = mx.sym.reshape(data=mx.sym.Variable(C.TARGET_LABEL_NAME), shape=(-1,))
 
+        if self.instantiate_hidden is not None:
+            self.decoder.set_instantiate_hidden(instantiate_hidden=self.instantiate_hidden,
+                                                output_layer=self.output_layer,
+                                                embedding_target=self.embedding_target,
+                                                gumbel_softmax_temperature=self.config.gumbel_softmax_temperature)
+
         if self.reconstruction is not None:
             # reconstructor (backward encoder/decoder)
             self.bw_encoder = self.encoder
@@ -112,17 +124,6 @@ class TrainingModel(model.SockeyeModel):
 
             if self.reconstruction == C.BILINGUAL:
                 reconstruction_labels = mx.sym.reshape(data=source_words, shape=(-1,))
-                # reconstruction decoder
-                self.rc_decoder = decoder.get_decoder(self.config.config_decoder,
-                                                      prefix=self.prefix + C.RECONSTRUCTION_PREFIX)
-                rc_out_weight_target = mx.sym.Variable(self.prefix + C.RECONSTRUCTION_PREFIX + "target_output_weight",
-                                                       shape=(self.config.vocab_target_size, self.rc_decoder.get_num_hidden()))
-                self.rc_output_layer = layers.OutputLayer(hidden_size=self.rc_decoder.get_num_hidden(),
-                                                          vocab_size=self.config.vocab_target_size,
-                                                          weight=rc_out_weight_target,
-                                                          weight_normalization=self.config.weight_normalization,
-                                                          no_bias=self.config.output_layer_no_bias,
-                                                          prefix=self.prefix + C.RECONSTRUCTION_PREFIX + C.DEFAULT_OUTPUT_LAYER_PREFIX)
             elif self.reconstruction == C.MONOLINGUAL:
                 # language model decoders
                 # target LM-0 = EN <2sw> | LM-1 = SW <2en>
@@ -133,7 +134,7 @@ class TrainingModel(model.SockeyeModel):
                 self.lm_output_layer = [None] * self.lm_num
                 for i in range(self.lm_num):
                     # match_lm_lang: (batch_size, 1)
-                    self.match_lm_lang[i] = mx.sym.slice(source_words, begin=(None, 0), end=(None, 1)) == source_2lang_id[i]
+                    self.match_lm_lang[i] = source_words.slice_axis(axis=1, begin=0, end=1) == source_2lang_id[i]
                     lm_prefix = C.LANGUAGE_MODEL_PREFIX + str(i) + "_"
                     self.lm_decoder[i] = decoder.get_decoder(self.lm_config.config_decoder,
                                                              prefix=self.prefix + lm_prefix)
@@ -185,13 +186,14 @@ class TrainingModel(model.SockeyeModel):
                                                            source_embed_seq_len)
 
             # decoder
+#            self.decoder.set_teacher_forcing_probability(0.0001)
             # target_decoded: (batch-size, target_seq_len, decoder_depth)
-            (target_decoded, _, _, _) = self.decoder.decode_sequence(source_encoded,
-                                                                     source_encoded_length,
-                                                                     source_encoded_seq_len,
-                                                                     target_embed,
-                                                                     target_embed_length,
-                                                                     target_embed_seq_len)
+            (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded,
+                                                                  source_encoded_length,
+                                                                  source_encoded_seq_len,
+                                                                  target_embed,
+                                                                  target_embed_length,
+                                                                  target_embed_seq_len)
 
             # target_decoded: (batch_size * target_seq_len, decoder_depth)
             target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
@@ -236,17 +238,18 @@ class TrainingModel(model.SockeyeModel):
 
             # forward decoder (no teacher forcing)
             self.decoder.set_teacher_forcing_probability(0.0)
+            self.decoder.decode_sequence_as_instantiated_hidden = self.instantiate_hidden is not None
             # fw_decoded: (batch-size, max_seq_len, decoder_depth)
             # fw_decoded: y1 y2 ... yn <EOS>
             # fw_decoded_length = max_seq_len
             (fw_decoded,
              fw_decoded_length,
-             fw_decoded_seq_len, _) = self.decoder.decode_sequence(fw_encoded,
-                                                                   fw_encoded_length,
-                                                                   fw_encoded_seq_len,
-                                                                   target_embed,
-                                                                   fw_encoded_length,
-                                                                   target_embed_seq_len)
+             fw_decoded_seq_len) = self.decoder.decode_sequence(fw_encoded,
+                                                                fw_encoded_length,
+                                                                fw_encoded_seq_len,
+                                                                target_embed,
+                                                                fw_encoded_length,
+                                                                target_embed_seq_len)
 
             # backward encoder
             # bw_encoded: (batch_size, max_seq_len, encoder_depth)
@@ -262,26 +265,15 @@ class TrainingModel(model.SockeyeModel):
                 ###### Translation ######
                 # forward decoder (teacher forcing)
                 self.decoder.set_teacher_forcing_probability(1.0)
+                self.decoder.decode_sequence_as_instantiated_hidden = False
                 # target_decoded: (batch-size, max_seq_len, decoder_depth)
                 # target_decoded: y1 y2 ... yn <EOS>
-                (target_decoded, _, _, _) = self.decoder.decode_sequence(fw_encoded,
-                                                                         fw_encoded_length,
-                                                                         fw_encoded_seq_len,
-                                                                         target_embed,
-                                                                         target_embed_length,
-                                                                         target_embed_seq_len)
-#                # fw_decoded: y1 y2 ... yn <EOS>
-#                # fw_decoded_length = max_seq_len
-#                (fw_decoded,
-#                 fw_decoded_length,
-#                 fw_decoded_seq_len) = self.decoder.decode_sequence(fw_encoded,
-#                                                                    fw_encoded_length,
-#                                                                    fw_encoded_seq_len,
-#                                                                    target_embed,
-#                                                                    target_embed_length,
-#                                                                    target_embed_seq_len)
-#                fw_decoded_length = target_embed_length
-#                target_decoded = fw_decoded
+                (target_decoded, _, _) = self.decoder.decode_sequence(fw_encoded,
+                                                                      fw_encoded_length,
+                                                                      fw_encoded_seq_len,
+                                                                      target_embed,
+                                                                      target_embed_length,
+                                                                      target_embed_seq_len)
 
                 # target_decoded: (batch_size * max_seq_len, decoder_depth)
                 target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
@@ -295,41 +287,25 @@ class TrainingModel(model.SockeyeModel):
                                                                    grad_scale=1.0-self.reconstruction_loss_weight)
 
                 ###### Reconstruction ######
-                # backward encoder
-                # bw_encoded: (batch_size, max_seq_len, encoder_depth)
-                # bw_encoded: y1 y2 ... yn <EOS>
-                # bw_encoded_length = max_seq_len
-                (bw_encoded,
-                 bw_encoded_length,
-                 bw_encoded_seq_len) = self.bw_encoder.encode(fw_decoded,
-                                                              fw_decoded_length,
-                                                              fw_decoded_seq_len)
-
                 # source_embed_bos_1: <BOS>
-                source_embed_bos_1 = mx.sym.slice(target_embed, begin=(None, 0, None), end=(None, 1, None))
+                source_embed_bos_1 = target_embed.slice_axis(axis=1, begin=0, end=1)
                 # source_embed_bos_2: x1 x2 ... xn <EOS>
-                source_embed_bos_2 = mx.sym.slice(source_embed, begin=(None, 0, None), end=(None, -1, None))
+                source_embed_bos_2 = source_embed.slice_axis(axis=1, begin=0, end=-1)
                 # source_embed_bos: <BOS> y1 y2 ... yn <EOS>
                 source_embed_bos = mx.sym.concat(source_embed_bos_1, source_embed_bos_2, dim=1)
 #                source_embed_bos = mx.sym.BlockGrad(source_embed_bos)
 
                 # backward decoder
                 self.bw_decoder.set_teacher_forcing_probability(1.0)
+                self.bw_decoder.decode_sequence_as_instantiated_hidden = False
                 # bw_decoded: (batch_size, max_seq_len, decoder_depth)
                 # bw_decoded: x1 x2 ... xn <EOS>
-                (bw_decoded, _, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
-                                                                        bw_encoded_length,
-                                                                        bw_encoded_seq_len,
-                                                                        source_embed_bos,
-                                                                        source_embed_length,
-                                                                        source_embed_seq_len)
-#                self.rc_decoder.set_teacher_forcing_probability(1.0)
-#                (bw_decoded, _, _, _) = self.rc_decoder.decode_sequence(fw_decoded,
-#                                                                        fw_decoded_length,
-#                                                                        fw_decoded_seq_len,
-#                                                                        source_embed_bos,
-#                                                                        source_embed_length,
-#                                                                        source_embed_seq_len)
+                (bw_decoded, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
+                                                                     bw_encoded_length,
+                                                                     bw_encoded_seq_len,
+                                                                     source_embed_bos,
+                                                                     source_embed_length,
+                                                                     source_embed_seq_len)
 
                 # bw_decoded: (batch_size * max_seq_len, decoder_depth)
                 bw_decoded = mx.sym.reshape(data=bw_decoded, shape=(-3, 0))
@@ -337,7 +313,6 @@ class TrainingModel(model.SockeyeModel):
                 # backward output layer
                 # bw_logits: (batch_size * max_seq_len, source_vocab_size)
                 bw_logits = self.output_layer(bw_decoded)
-#                bw_logits = self.rc_output_layer(bw_decoded)
 
                 reconstruction_loss_output = self.model_loss.get_loss(bw_logits,
                                                                       labels=reconstruction_labels,
@@ -349,9 +324,9 @@ class TrainingModel(model.SockeyeModel):
             elif self.reconstruction == C.MONOLINGUAL:
                 ###### Language Modeling ######
                 # fw_decoded_bos_1: <BOS>
-                fw_decoded_bos_1 = mx.sym.slice(target_embed, begin=(None, 0, None), end=(None, 1, None))
+                fw_decoded_bos_1 = target_embed.slice_axis(axis=1, begin=0, end=1)
                 # fw_decoded_bos_2: y1 y2 ... yn <EOS>
-                fw_decoded_bos_2 = mx.sym.slice(fw_decoded, begin=(None, 0, None), end=(None, -1, None))
+                fw_decoded_bos_2 = fw_decoded.slice_axis(axis=1, begin=0, end=-1)
                 # fw_decoded_bos: <BOS> y1 y2 ... yn <EOS>
                 fw_decoded_bos = mx.sym.concat(fw_decoded_bos_1, fw_decoded_bos_2, dim=1)
                 fw_decoded_bos = mx.sym.BlockGrad(fw_decoded_bos)
@@ -367,14 +342,15 @@ class TrainingModel(model.SockeyeModel):
                 for i in range(self.lm_num):
                     # language model
                     self.lm_decoder[i].set_teacher_forcing_probability(1.0)
+                    self.lm_decoder[i].decode_sequence_as_instantiated_hidden = False
                     # lm_decoded: (batch_size, max_seq_len, lm_decoder_depth)
                     # lm_decoded: y1 y2 ... yn <EOS>
-                    (lm_decoded, _, _, _) = self.lm_decoder[i].decode_sequence(fw_encoded,
-                                                                               fw_encoded_length,
-                                                                               fw_encoded_seq_len,
-                                                                               fw_decoded_bos,
-                                                                               fw_decoded_length,
-                                                                               fw_decoded_seq_len)
+                    (lm_decoded, _, _) = self.lm_decoder[i].decode_sequence(fw_encoded,
+                                                                            fw_encoded_length,
+                                                                            fw_encoded_seq_len,
+                                                                            fw_decoded_bos,
+                                                                            fw_decoded_length,
+                                                                            fw_decoded_seq_len)
 
                     # lm_decoded: (batch_size * max_seq_len, lm_decoder_depth)
                     lm_decoded = mx.sym.reshape(data=lm_decoded, shape=(-3, 0))
@@ -397,14 +373,15 @@ class TrainingModel(model.SockeyeModel):
                 ###### Reconstruction ######
                 # backward decoder
                 self.bw_decoder.set_teacher_forcing_probability(1.0)
+                self.bw_decoder.decode_sequence_as_instantiated_hidden = False
                 # bw_decoded: (batch_size, max_seq_len, decoder_depth)
                 # bw_decoded: x1 x2 ... xn <EOS>
-                (bw_decoded, _, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
-                                                                        bw_encoded_length,
-                                                                        bw_encoded_seq_len,
-                                                                        target_embed,
-                                                                        target_embed_length,
-                                                                        target_embed_seq_len)
+                (bw_decoded, _, _) = self.bw_decoder.decode_sequence(bw_encoded,
+                                                                     bw_encoded_length,
+                                                                     bw_encoded_seq_len,
+                                                                     target_embed,
+                                                                     target_embed_length,
+                                                                     target_embed_seq_len)
 
                 # bw_decoded: (batch_size * max_seq_len, decoder_depth)
                 bw_decoded = mx.sym.reshape(data=bw_decoded, shape=(-3, 0))
@@ -672,8 +649,8 @@ class TrainingModel(model.SockeyeModel):
         :param checkpoint: Current checkpoint number.
         :return: Whether the teacher forcing probability was adjusted.
         """
-        if self.config.teacher_forcing_probability_reduce_factor is not None:
-            tfprf = self.config.teacher_forcing_probability_reduce_factor
+        if self.teacher_forcing_probability_reduce_factor is not None:
+            tfprf = self.teacher_forcing_probability_reduce_factor
             old_tfp = self.decoder.teacher_forcing_probability
 #            new_tfp = tfprf**checkpoint
             new_tfp = (tfprf+1)/(tfprf+exp(checkpoint/tfprf))

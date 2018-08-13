@@ -901,5 +901,5 @@ def gumbel_softmax(logits: mx.sym.Symbol,
     :param eps: Parameter for Gumbel distribution.
     :return: Sample distribution over categories.
     """
-    gumbel_noise = -mx.sym.log(-mx.sym.log(mx.sym.uniform() + eps) + eps)
+    gumbel_noise = -mx.sym.log(-mx.sym.log(mx.sym.random_uniform() + eps) + eps)
     return mx.sym.softmax((logits + gumbel_noise) / temperature, axis=axis)

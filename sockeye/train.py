@@ -714,9 +714,7 @@ def create_model_config(args: argparse.Namespace,
                                      weight_tying_type=args.weight_tying_type if args.weight_tying else None,
                                      weight_normalization=args.weight_normalization,
                                      output_layer_no_bias=args.output_layer_no_bias,
-                                     instantiate_hidden=args.instantiate_hidden,
                                      gumbel_softmax_temperature=args.gumbel_softmax_temperature,
-                                     teacher_forcing_probability_reduce_factor=args.teacher_forcing_probability_reduce_factor,
                                      lhuc=args.lhuc is not None)
     return model_config
 
@@ -749,7 +747,9 @@ def create_training_model(config: model.ModelConfig,
                                             fixed_param_names=args.fixed_param_names,
                                             reconstruction=args.reconstruction,
                                             reconstruction_loss_weight=args.reconstruction_loss_weight,
-                                            lm_config=lm_config)
+                                            lm_config=lm_config,
+                                            instantiate_hidden=args.instantiate_hidden,
+                                            teacher_forcing_probability_reduce_factor=args.teacher_forcing_probability_reduce_factor)
 
     return training_model
 
