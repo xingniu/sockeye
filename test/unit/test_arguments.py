@@ -112,7 +112,7 @@ def test_device_args(test_params, expected_params):
               weight_normalization=False,
               output_layer_no_bias=False,
               instantiate_hidden=None,
-              gumbel_softmax_temperature=1.0,
+              softmax_temperature=1.0,
               lhuc=None,
               encoder=C.TRANSFORMER_TYPE,
               conv_embed_max_filter_width=8,

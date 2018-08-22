@@ -115,7 +115,7 @@ class TrainingModel(model.SockeyeModel):
             self.decoder.set_instantiate_hidden(instantiate_hidden=self.instantiate_hidden,
                                                 output_layer=self.output_layer,
                                                 embedding_target=self.embedding_target,
-                                                gumbel_softmax_temperature=self.config.gumbel_softmax_temperature)
+                                                softmax_temperature=self.config.softmax_temperature)
 
         if self.reconstruction is not None:
             # reconstructor (backward encoder/decoder)

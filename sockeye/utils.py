@@ -897,7 +897,7 @@ def gumbel_softmax(logits: mx.sym.Symbol,
 
     :param logits: Unnormalized log-probs.
     :param axis: Axis along which to calculate softmax.
-    :param temperature: Gumbel-Softmax temperature (non-negative scalar).
+    :param temperature: Softmax temperature (non-negative scalar).
     :param eps: Parameter for Gumbel distribution.
     :return: Sample distribution over categories.
     """

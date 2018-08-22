@@ -50,7 +50,7 @@ ENCODER_DECODER_SETTINGS = [
      "--beam-size 2",
      True, False, False),
     # Monolingual reconstruction with instantiated hidden states - "kitchen sink" LSTM encoder-decoder with attention
-    ("--reconstruction monolingual --instantiate-hidden gumbel-softmax --gumbel-softmax-temperature 5.0 --encoder rnn"
+    ("--reconstruction monolingual --instantiate-hidden gumbel-softmax --softmax-temperature 5.0 --encoder rnn"
      " --decoder rnn --num-layers 4:2 --rnn-cell-type lstm --rnn-num-hidden 16 --rnn-residual-connections"
      " --num-embed 16 --rnn-attention-type coverage --rnn-attention-num-hidden 16"
      " --rnn-attention-use-prev-word --rnn-context-gating --layer-normalization --batch-size 13"
