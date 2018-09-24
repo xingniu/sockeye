@@ -744,6 +744,10 @@ def add_model_parameters(params):
                               default=1.0,
                               help='Controls peakiness of model predictions. Values < 1.0 produce '
                                    'peaked predictions, values > 1.0 produce smoothed distributions.')
+    model_params.add_argument('--gumbel-noise-scale',
+                              type=float,
+                              default=1.0,
+                              help='Gumbel noise scale.')
 
 
 def add_training_args(params):
@@ -774,6 +778,9 @@ def add_training_args(params):
 #                              choices=["scheduled-sampling", "linear-combination"],
 #                              help='The type of reducing the teacher forcing probability. '
 #                                   'This is currently for training RNN decoders only. Default: %(default)s.')
+    train_params.add_argument('--decoder-block-grad-prev-prediction', action="store_true",
+                              help="Blocks gradient computation for the previous prediction in the decoder. "
+                                   "Default: %(default)s.")
 
     train_params.add_argument('--batch-size', '-b',
                               type=int_greater_or_equal(1),

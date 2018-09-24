@@ -62,6 +62,7 @@ class TrainingModel(model.SockeyeModel):
     :param lm_config: Configuration object holding details about the language model.
     :param instantiate_hidden: Use instantiated hidden states as previous target embeddings.
     :param teacher_forcing_probability_reduce_factor: The factor of reducing the teacher forcing probability.
+    :param decoder_block_grad_prev_prediction: Blocks gradient computation for the previous prediction in the decoder.
     """
 
     def __init__(self,
@@ -78,7 +79,8 @@ class TrainingModel(model.SockeyeModel):
                  reconstruction_loss_weight: Optional[float] = 0.5,
                  lm_config: Optional[model.ModelConfig] = None,
                  instantiate_hidden: str = None,
-                 teacher_forcing_probability_reduce_factor: float = None) -> None:
+                 teacher_forcing_probability_reduce_factor: float = None,
+                 decoder_block_grad_prev_prediction: bool = False) -> None:
         super().__init__(config)
         self.context = context
         self.output_dir = output_dir
@@ -88,6 +90,7 @@ class TrainingModel(model.SockeyeModel):
         self.lm_config = lm_config
         self.instantiate_hidden = instantiate_hidden
         self.teacher_forcing_probability_reduce_factor = teacher_forcing_probability_reduce_factor
+        self.decoder_block_grad_prev_prediction = decoder_block_grad_prev_prediction
         self._bucketing = bucketing
         self._gradient_compression_params = gradient_compression_params
         self._provide_data = provide_data
@@ -115,7 +118,8 @@ class TrainingModel(model.SockeyeModel):
             self.decoder.set_instantiate_hidden(instantiate_hidden=self.instantiate_hidden,
                                                 output_layer=self.output_layer,
                                                 embedding_target=self.embedding_target,
-                                                softmax_temperature=self.config.softmax_temperature)
+                                                softmax_temperature=self.config.softmax_temperature,
+                                                gumbel_noise_scale=self.config.gumbel_noise_scale)
 
         if self.reconstruction is not None:
             # reconstructor (backward encoder/decoder)
@@ -239,6 +243,7 @@ class TrainingModel(model.SockeyeModel):
             # forward decoder (no teacher forcing)
             self.decoder.set_teacher_forcing_probability(0.0)
             self.decoder.decode_sequence_as_instantiated_hidden = self.instantiate_hidden is not None
+            self.decoder.block_grad_prev_prediction = self.decoder_block_grad_prev_prediction
             # fw_decoded: (batch-size, max_seq_len, decoder_depth)
             # fw_decoded: y1 y2 ... yn <EOS>
             # fw_decoded_length = max_seq_len
@@ -266,6 +271,7 @@ class TrainingModel(model.SockeyeModel):
                 # forward decoder (teacher forcing)
                 self.decoder.set_teacher_forcing_probability(1.0)
                 self.decoder.decode_sequence_as_instantiated_hidden = False
+                self.decoder.block_grad_prev_prediction = False
                 # target_decoded: (batch-size, max_seq_len, decoder_depth)
                 # target_decoded: y1 y2 ... yn <EOS>
                 (target_decoded, _, _) = self.decoder.decode_sequence(fw_encoded,
@@ -298,6 +304,7 @@ class TrainingModel(model.SockeyeModel):
                 # backward decoder
                 self.bw_decoder.set_teacher_forcing_probability(1.0)
                 self.bw_decoder.decode_sequence_as_instantiated_hidden = False
+                self.bw_decoder.block_grad_prev_prediction = False
                 # bw_decoded: (batch_size, max_seq_len, decoder_depth)
                 # bw_decoded: x1 x2 ... xn <EOS>
                 (bw_decoded, _, _) = self.bw_decoder.decode_sequence(bw_encoded,

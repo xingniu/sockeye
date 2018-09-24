@@ -48,7 +48,8 @@ class ModelConfig(Config):
     :param weight_tying: Enables weight tying if True.
     :param weight_tying_type: Determines which weights get tied. Must be set if weight_tying is enabled.
     :param output_layer_no_bias: Ignores the bias in decoder output layers.
-    :param softmax_temperature: The temperature in the softmax function
+    :param softmax_temperature: The temperature in the softmax function.
+    :param gumbel_noise_scale: Gumbel noise scale.
     :param lhuc: LHUC (Vilar 2018) is applied at some part of the model.
     """
 
@@ -66,6 +67,7 @@ class ModelConfig(Config):
                  weight_normalization: bool = False,
                  output_layer_no_bias: bool = False,
                  softmax_temperature: float = 1.0,
+                 gumbel_noise_scale: float = 1.0,
                  lhuc: bool = False) -> None:
         super().__init__()
         self.config_data = config_data
@@ -81,6 +83,7 @@ class ModelConfig(Config):
         self.weight_normalization = weight_normalization
         self.output_layer_no_bias = output_layer_no_bias
         self.softmax_temperature = softmax_temperature
+        self.gumbel_noise_scale = gumbel_noise_scale
         if weight_tying and weight_tying_type is None:
             raise RuntimeError("weight_tying_type must be specified when using weight_tying.")
         self.lhuc = lhuc

@@ -715,6 +715,7 @@ def create_model_config(args: argparse.Namespace,
                                      weight_normalization=args.weight_normalization,
                                      output_layer_no_bias=args.output_layer_no_bias,
                                      softmax_temperature=args.softmax_temperature,
+                                     gumbel_noise_scale=args.gumbel_noise_scale,
                                      lhuc=args.lhuc is not None)
     return model_config
 
@@ -749,7 +750,8 @@ def create_training_model(config: model.ModelConfig,
                                             reconstruction_loss_weight=args.reconstruction_loss_weight,
                                             lm_config=lm_config,
                                             instantiate_hidden=args.instantiate_hidden,
-                                            teacher_forcing_probability_reduce_factor=args.teacher_forcing_probability_reduce_factor)
+                                            teacher_forcing_probability_reduce_factor=args.teacher_forcing_probability_reduce_factor,
+                                            decoder_block_grad_prev_prediction=args.decoder_block_grad_prev_prediction)
 
     return training_model
 
