@@ -985,6 +985,7 @@ class Translator:
     :param avoid_list: Global list of phrases to exclude from the output.
     :param store_beam: If True, store the beam search history and return it in the TranslatorOutput.
     :param strip_unknown_words: If True, removes any <unk> symbols from outputs.
+    :param nbest_word_list_size: Size of the n-best word list at each step for top translations.
     :param skip_topk: If True, uses argmax instead of topk for greedy decoding.
     """
 
@@ -1002,6 +1003,7 @@ class Translator:
                  avoid_list: Optional[str] = None,
                  store_beam: bool = False,
                  strip_unknown_words: bool = False,
+                 nbest_word_list_size: int = 5,
                  skip_topk: bool = False) -> None:
         self.context = context
         self.length_penalty = length_penalty
@@ -1019,6 +1021,7 @@ class Translator:
         self.unk_id = self.vocab_target[C.UNK_SYMBOL]
         if strip_unknown_words:
             self.strip_ids.add(self.unk_id)
+        self.nbest_word_list_size = nbest_word_list_size
         self.models = models
         utils.check_condition(all(models[0].source_with_eos == m.source_with_eos for m in models),
                               "The source_with_eos property must match across models.")
@@ -1556,9 +1559,9 @@ class Translator:
         t = 1
         for t in range(1, max_output_length):
             # (1) obtain next predictions and advance models' state
-            # scores: (batch_size * beam_size, target_vocab_size)
+            # raw_scores: (batch_size * beam_size, target_vocab_size)
             # attention_scores: (batch_size * beam_size, bucket_key)
-            scores, attention_scores, model_states = self._decode_step(prev_word=best_word_indices,
+            raw_scores, attention_scores, model_states = self._decode_step(prev_word=best_word_indices,
                                                                        step=t,
                                                                        source_length=source_length,
                                                                        states=model_states,
@@ -1567,7 +1570,7 @@ class Translator:
 
             # (2) Update scores. Special treatment for finished and inactive rows. Inactive rows are inf everywhere;
             # finished rows are inf everywhere except column zero, which holds the accumulated model score
-            scores = self._update_scores.forward(scores, finished, inactive, scores_accumulated, self.inf_array, pad_dist)
+            scores = self._update_scores.forward(raw_scores, finished, inactive, scores_accumulated, self.inf_array, pad_dist)
 
             # Mark entries that should be blocked as having a score of np.inf
             if self.global_avoid_trie or any(raw_avoid_list):
@@ -1578,6 +1581,9 @@ class Translator:
             # (3) Get beam_size winning hypotheses for each sentence block separately. Only look as
             # far as the active beam size for each sentence.
             best_hyp_indices, best_word_indices, scores_accumulated = self._top(scores)
+            top_scores_values, top_scores_indices = mx.nd.topk(raw_scores, axis=1, k=self.nbest_word_list_size, ret_typ='both', is_ascend=True)
+            top_scores = mx.nd.concat(top_scores_indices.expand_dims(axis=2), top_scores_values.expand_dims(axis=2), dim=2)
+            top_scores = [top_scores[index].asnumpy() for index in best_hyp_indices.asnumpy()]
 
             # Constraints for constrained decoding are processed sentence by sentence
             if any(raw_constraint_list):
@@ -1652,6 +1658,9 @@ class Translator:
                         beam_histories[sent]["scores"].append(unnormalized_scores[rows].asnumpy().flatten().tolist())
                         beam_histories[sent]["normalized_scores"].append(
                             normalized_scores[rows].asnumpy().flatten().tolist())
+                        beam_histories[sent]["nbest_words"].append([{self.vocab_target_inv[int(pair[0])]:float(pair[1])
+                                                                    for pair in top_scores_per_sent}
+                                                                    for top_scores_per_sent in top_scores[rows]])
 
             # Collect best hypotheses, best word indices, and attention scores
             best_hyp_indices_list.append(best_hyp_indices)
@@ -1727,13 +1736,23 @@ class Translator:
 
         # Obtain sequences for all best hypotheses in the batch
         indices = self._get_best_word_indeces_for_kth_hypotheses(best_ids, best_hyp_indices)
+        best_word_indeces_for_top_hypotheses = best_word_indices[indices, np.arange(indices.shape[1])]
 
-        histories = beam_histories if beam_histories is not None else [None] * self.batch_size  # type: List
-        return [self._assemble_translation(*x) for x in zip(best_word_indices[indices, np.arange(indices.shape[1])],
+        if beam_histories is not None and beam_histories[0] is not None:
+            for sent in range(self.batch_size):
+                shifted_indices = indices[sent] - (sent * self.beam_size)
+                all_nbest_words = beam_histories[sent]["nbest_words"]
+                valid_length = sum(np.logical_and(best_word_indeces_for_top_hypotheses[sent] != C.PAD_ID,
+                                                  best_word_indeces_for_top_hypotheses[sent] != self.vocab_target[C.EOS_SYMBOL]))
+                beam_histories[sent]["nbest_words"] = [all_nbest_words[step][shifted_indices[step]] for step in range(valid_length)]
+        else:
+            beam_histories = [None] * self.batch_size  # type: List
+
+        return [self._assemble_translation(*x) for x in zip(best_word_indeces_for_top_hypotheses,
                                                             lengths[best_ids],
                                                             attentions[best_ids],
                                                             seq_scores[best_ids],
-                                                            histories)]
+                                                            beam_histories)]
 
     @staticmethod
     def _get_best_word_indeces_for_kth_hypotheses(ks: np.ndarray, all_hyp_indices: np.ndarray) -> np.ndarray:

@@ -92,7 +92,7 @@ def run_translate(args: argparse.Namespace):
         if args.restrict_lexicon:
             restrict_lexicon = TopKLexicon(source_vocabs[0], target_vocab)
             restrict_lexicon.load(args.restrict_lexicon, k=args.restrict_lexicon_topk)
-        store_beam = args.output_type == C.OUTPUT_HANDLER_BEAM_STORE
+        store_beam = args.output_type == C.OUTPUT_HANDLER_BEAM_STORE or args.output_type == C.OUTPUT_HANDLER_NBEST_WORDS
         translator = inference.Translator(context=context,
                                           ensemble_mode=args.ensemble_mode,
                                           bucket_source_width=args.bucket_width,
@@ -107,6 +107,7 @@ def run_translate(args: argparse.Namespace):
                                           avoid_list=args.avoid_list,
                                           store_beam=store_beam,
                                           strip_unknown_words=args.strip_unknown_words,
+                                          nbest_word_list_size=args.nbest_word_list_size,
                                           skip_topk=args.skip_topk)
         read_and_translate(translator=translator,
                            output_handler=output_handler,
