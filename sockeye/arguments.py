@@ -760,7 +760,7 @@ def add_training_args(params):
     train_params.add_argument('--reconstruction',
                               type=str,
                               default=None,
-                              choices=[C.MONOLINGUAL, C.BILINGUAL],
+                              choices=C.RECONSTRUCTION_CHOICES,
                               help='Train or fine-tune bidirectional NMT models by reconstructing the source data. '
                                    'This is currently for RNN models only. Default: %(default)s.')
     train_params.add_argument('--reconstruction-loss-weight',
@@ -853,6 +853,10 @@ def add_training_args(params):
                               help='Maximum number of checkpoints the model is allowed to not improve in '
                                    '<optimized-metric> on validation data before training is stopped. '
                                    'Default: %(default)s.')
+    train_params.add_argument('--num-ignored-not-improved',
+                              type=int,
+                              default=0,
+                              help='Default: %(default)s.')
     train_params.add_argument('--min-num-epochs',
                               type=int,
                               default=None,

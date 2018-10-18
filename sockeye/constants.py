@@ -400,6 +400,8 @@ PREPARED_DATA_VERSION = 2
 # reconstruction
 MONOLINGUAL = "monolingual"
 BILINGUAL = "bilingual"
+BILINGUAL_HIDDEN = "bilingual-hidden"
+RECONSTRUCTION_CHOICES = [MONOLINGUAL, BILINGUAL, BILINGUAL_HIDDEN]
 
 # instantiating hidden states
 ARGMAX_NAME = "argmax"

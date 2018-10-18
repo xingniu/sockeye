@@ -128,6 +128,12 @@ class TrainingModel(model.SockeyeModel):
 
             if self.reconstruction == C.BILINGUAL:
                 reconstruction_labels = mx.sym.reshape(data=source_words, shape=(-1,))
+            elif self.reconstruction == C.BILINGUAL_HIDDEN:
+                reconstruction_labels = mx.sym.reshape(data=source_words, shape=(-1,))
+                self.encoder_reconstructor = decoder.get_decoder(self.config.config_decoder,
+                                                                 prefix=self.prefix + "enc_rec_")
+                self.decoder_reconstructor = decoder.get_decoder(self.config.config_decoder,
+                                                                 prefix=self.prefix + "dec_rec_")
             elif self.reconstruction == C.MONOLINGUAL:
                 # language model decoders
                 # target LM-0 = EN <2sw> | LM-1 = SW <2en>
@@ -297,9 +303,8 @@ class TrainingModel(model.SockeyeModel):
                 source_embed_bos_1 = target_embed.slice_axis(axis=1, begin=0, end=1)
                 # source_embed_bos_2: x1 x2 ... xn <EOS>
                 source_embed_bos_2 = source_embed.slice_axis(axis=1, begin=0, end=-1)
-                # source_embed_bos: <BOS> y1 y2 ... yn <EOS>
+                # source_embed_bos: <BOS> x1 x2 ... xn <EOS>
                 source_embed_bos = mx.sym.concat(source_embed_bos_1, source_embed_bos_2, dim=1)
-#                source_embed_bos = mx.sym.BlockGrad(source_embed_bos)
 
                 # backward decoder
                 self.bw_decoder.set_teacher_forcing_probability(1.0)
@@ -327,6 +332,94 @@ class TrainingModel(model.SockeyeModel):
                                                                       prefix=C.RECONSTRUCTION_PREFIX)
 
                 loss_output = translation_loss_output + reconstruction_loss_output
+
+            elif self.reconstruction == C.BILINGUAL_HIDDEN:
+                ###### Translation ######
+                # forward decoder (teacher forcing)
+                self.decoder.set_teacher_forcing_probability(1.0)
+                self.decoder.decode_sequence_as_instantiated_hidden = False
+                self.decoder.block_grad_prev_prediction = False
+                # fw_decoded: (batch-size, max_seq_len, decoder_depth)
+                # fw_decoded: y1 y2 ... yn <EOS>
+                (fw_decoded,
+                 fw_decoded_length,
+                 fw_decoded_seq_len) = self.decoder.decode_sequence(fw_encoded,
+                                                                    fw_encoded_length,
+                                                                    fw_encoded_seq_len,
+                                                                    target_embed,
+                                                                    target_embed_length,
+                                                                    target_embed_seq_len)
+
+                # target_decoded: (batch_size * max_seq_len, decoder_depth)
+                target_decoded = mx.sym.reshape(data=fw_decoded, shape=(-3, 0))
+
+                # output layer
+                # logits: (batch_size * max_seq_len, target_vocab_size)
+                logits = self.output_layer(target_decoded)
+
+                translation_loss_output = self.model_loss.get_loss(logits,
+                                                                   labels,
+                                                                   grad_scale=1.0-self.reconstruction_loss_weight)
+
+                ###### Reconstruction ######
+                # source_embed_bos_1: <BOS>
+                source_embed_bos_1 = target_embed.slice_axis(axis=1, begin=0, end=1)
+                # source_embed_bos_2: x1 x2 ... xn <EOS>
+                source_embed_bos_2 = source_embed.slice_axis(axis=1, begin=0, end=-1)
+                # source_embed_bos: <BOS> x1 x2 ... xn <EOS>
+                source_embed_bos = mx.sym.concat(source_embed_bos_1, source_embed_bos_2, dim=1)
+
+                # encoder reconstructor (teacher forcing)
+                self.encoder_reconstructor.set_teacher_forcing_probability(1.0)
+                self.encoder_reconstructor.decode_sequence_as_instantiated_hidden = False
+                self.encoder_reconstructor.block_grad_prev_prediction = False
+                # enc_rec_decoded: (batch-size, max_seq_len, decoder_depth)
+                # enc_rec_decoded: y1 y2 ... yn <EOS>
+                (enc_rec_decoded, _, _) = self.encoder_reconstructor.decode_sequence(fw_encoded,
+                                                                                     fw_encoded_length,
+                                                                                     fw_encoded_seq_len,
+                                                                                     source_embed_bos,
+                                                                                     source_embed_length,
+                                                                                     source_embed_seq_len)
+
+                # enc_rec_decoded: (batch_size * max_seq_len, decoder_depth)
+                enc_rec_decoded = mx.sym.reshape(data=enc_rec_decoded, shape=(-3, 0))
+
+                # backward output layer
+                # enc_rec_logits: (batch_size * max_seq_len, source_vocab_size)
+                enc_rec_logits = self.output_layer(enc_rec_decoded)
+
+                enc_reconstruction_loss_output = self.model_loss.get_loss(enc_rec_logits,
+                                                                          labels=reconstruction_labels,
+                                                                          grad_scale=self.reconstruction_loss_weight/2,
+                                                                          prefix=C.RECONSTRUCTION_PREFIX+"enc_")
+
+                # decoder reconstructor (teacher forcing)
+                self.decoder_reconstructor.set_teacher_forcing_probability(1.0)
+                self.decoder_reconstructor.decode_sequence_as_instantiated_hidden = False
+                self.decoder_reconstructor.block_grad_prev_prediction = False
+                # dec_rec_decoded: (batch-size, max_seq_len, decoder_depth)
+                # dec_rec_decoded: y1 y2 ... yn <EOS>
+                (dec_rec_decoded, _, _) = self.decoder_reconstructor.decode_sequence(fw_decoded,
+                                                                                     fw_decoded_length,
+                                                                                     fw_decoded_seq_len,
+                                                                                     source_embed_bos,
+                                                                                     source_embed_length,
+                                                                                     source_embed_seq_len)
+
+                # enc_rec_decoded: (batch_size * max_seq_len, decoder_depth)
+                dec_rec_decoded = mx.sym.reshape(data=dec_rec_decoded, shape=(-3, 0))
+
+                # backward output layer
+                # dec_rec_logits: (batch_size * max_seq_len, source_vocab_size)
+                dec_rec_logits = self.output_layer(dec_rec_decoded)
+
+                dec_reconstruction_loss_output = self.model_loss.get_loss(dec_rec_logits,
+                                                                          labels=reconstruction_labels,
+                                                                          grad_scale=self.reconstruction_loss_weight/2,
+                                                                          prefix=C.RECONSTRUCTION_PREFIX)
+
+                loss_output = translation_loss_output + enc_reconstruction_loss_output + dec_reconstruction_loss_output
 
             elif self.reconstruction == C.MONOLINGUAL:
                 ###### Language Modeling ######
@@ -456,7 +549,7 @@ class TrainingModel(model.SockeyeModel):
         Runs forward/backward pass and updates training metric(s).
         """
         self.module.forward_backward(batch)
-        if self.reconstruction == C.BILINGUAL:
+        if self.reconstruction == C.BILINGUAL or self.reconstruction == C.BILINGUAL_HIDDEN:
             source = batch.data[0].split(num_outputs=self.config.config_embed_source.num_factors,
                                          axis=2, squeeze_axis=True)
             source = source if self.config.config_embed_source.num_factors == 1 else source[0]
@@ -751,6 +844,7 @@ class EarlyStoppingTrainer:
             metrics: List[str],
             checkpoint_frequency: int,
             max_num_not_improved: int,
+            num_ignored_not_improved: int,
             min_samples: Optional[int] = None,
             max_samples: Optional[int] = None,
             min_updates: Optional[int] = None,
@@ -889,11 +983,22 @@ class EarlyStoppingTrainer:
                 # (4) determine improvement
                 has_improved = False
                 previous_best = self.state.best_metric
-                for checkpoint, metric_dict in enumerate(self.state.metrics, 1):
-                    value = metric_dict.get("%s-val" % early_stopping_metric, self.state.best_metric)
+                if num_ignored_not_improved <= 0:
+                    for checkpoint, metric_dict in enumerate(self.state.metrics, 1):
+                        value = metric_dict.get("%s-val" % early_stopping_metric, self.state.best_metric)
+                        if utils.metric_value_is_better(value, self.state.best_metric, early_stopping_metric):
+                            self.state.best_metric = value
+                            self.state.best_checkpoint = checkpoint
+                            has_improved = True
+                elif self.state.checkpoint <= num_ignored_not_improved:
+                    self.state.best_metric = self.state.metrics[-1].get("%s-val" % early_stopping_metric, self.state.best_metric)
+                    self.state.best_checkpoint = self.state.checkpoint
+                    has_improved = True
+                else:
+                    value = self.state.metrics[-1].get("%s-val" % early_stopping_metric, self.state.best_metric)
                     if utils.metric_value_is_better(value, self.state.best_metric, early_stopping_metric):
                         self.state.best_metric = value
-                        self.state.best_checkpoint = checkpoint
+                        self.state.best_checkpoint = self.state.checkpoint
                         has_improved = True
 
                 if has_improved:

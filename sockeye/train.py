@@ -949,6 +949,7 @@ def train(args: argparse.Namespace):
                     metrics=args.metrics,
                     checkpoint_frequency=args.checkpoint_frequency,
                     max_num_not_improved=max_num_checkpoint_not_improved,
+                    num_ignored_not_improved=args.num_ignored_not_improved,
                     min_samples=min_samples,
                     max_samples=max_samples,
                     min_updates=min_updates,
