@@ -374,12 +374,12 @@ class NBestWordsOutputHandler(OutputHandler):
         :param t_output: Translator output.
         :param t_walltime: Total wall-clock time for translation.
         """
-        assert len(t_output.beam_histories) >= 1, "Translator output should contain beam histories."
         new_h = {"translation": t_output.translation}
         new_h["id"] = t_output.sentence_id  # type: ignore
         new_h["nbest_words"] = [] # type: ignore
-        # If the sentence was max_len split, we may have more than one history
-        for h in t_output.beam_histories:
-            new_h["nbest_words"] += h["nbest_words"]
+        if len(t_output.beam_histories) >= 1:
+            # If the sentence was max_len split, we may have more than one history
+            for h in t_output.beam_histories:
+                new_h["nbest_words"] += h["nbest_words"]
         self.stream.write("%s\n" % json.dumps(new_h, sort_keys=True))
         self.stream.flush()
