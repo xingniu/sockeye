@@ -21,9 +21,16 @@ BOS_SYMBOL = "<s>"
 EOS_SYMBOL = "</s>"
 UNK_SYMBOL = "<unk>"
 PAD_SYMBOL = "<pad>"
+EN_LANG_TAG_SYMBOL = "<2en>"
+FR_LANG_TAG_SYMBOL = "<2fr>"
 PAD_ID = 0
+UNK_ID = 1
+BOS_ID = 2
+EOS_ID = 3
+EN_LANG_TAG_ID = 4
+FR_LANG_TAG_ID = 5
 TOKEN_SEPARATOR = " "
-VOCAB_SYMBOLS = [PAD_SYMBOL, UNK_SYMBOL, BOS_SYMBOL, EOS_SYMBOL]
+VOCAB_SYMBOLS = [PAD_SYMBOL, UNK_SYMBOL, BOS_SYMBOL, EOS_SYMBOL, EN_LANG_TAG_SYMBOL, FR_LANG_TAG_SYMBOL]
 # reserve extra space for the EOS or BOS symbol that is added to both source and target
 SPACE_FOR_XOS = 1
 
@@ -359,6 +366,7 @@ METRIC_WORST = {ACCURACY: 0.0, BLEU: 0.0, ROUGE1: 0.0, PERPLEXITY: np.inf}
 
 # loss
 CROSS_ENTROPY = 'cross-entropy'
+CUSTOM_PERPLEXITY = 'custom-perplexity'
 
 LOSS_NORM_BATCH = 'batch'
 LOSS_NORM_VALID = "valid"

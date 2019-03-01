@@ -116,10 +116,6 @@ def check_arg_compatibility(args: argparse.Namespace):
         check_condition(args.rnn_num_hidden == args.num_embed[0],
                         "Source embedding size must match RNN decoder size for reconstruction training: %s vs. %s"
                         % (args.rnn_num_hidden, args.num_embed[0]))
-        if args.reconstruction == C.MONOLINGUAL:
-            check_condition(args.source == args.target,
-                            "Source and target side of the training data must be the same for reconstructing "
-                            "the monolingual data: %s vs. %s" % (args.source, args.target))
         if not args.weight_tying or args.weight_tying_type != C.WEIGHT_TYING_SRC_TRG_SOFTMAX:
             logger.info("Source embeddings, target embeddings and the target softmax weight matrix "
                         "will be tied when training bidirectional NMT models with reconstruction.")

@@ -91,10 +91,12 @@ class Decoder(ABC):
         self.dtype = dtype
         self.teacher_forcing_probability = 1.0
         self.instantiate_hidden = None
+        self.target_vocab_size = len(C.VOCAB_SYMBOLS)
         self.decode_sequence_as_instantiated_hidden = False
         self.softmax_temperature = 1.0
         self.gumbel_noise_scale = 1.0
         self.block_grad_prev_prediction = False
+        self.target_word_dist = None
 
     @abstractmethod
     def decode_sequence(self,
@@ -214,6 +216,7 @@ class Decoder(ABC):
 
     def set_instantiate_hidden(self,
                                instantiate_hidden: str,
+                               target_vocab_size: int,
                                output_layer: layers.OutputLayer,
                                embedding_target: encoder.Embedding,
                                softmax_temperature: float = 1.0,
@@ -226,6 +229,8 @@ class Decoder(ABC):
         self.embedding_target = embedding_target
         self.softmax_temperature = softmax_temperature
         self.gumbel_noise_scale = gumbel_noise_scale
+        self.target_vocab_size = target_vocab_size
+
 
 @Decoder.register(transformer.TransformerConfig, C.TRANSFORMER_DECODER_PREFIX)
 class TransformerDecoder(Decoder):
@@ -615,6 +620,7 @@ class RecurrentDecoder(Decoder):
 
         # target_embed: target_seq_len * (batch_size, num_target_embed)
         target_embed = mx.sym.split(data=target_embed, num_outputs=target_embed_max_length, axis=1, squeeze_axis=True)
+#        padding_dist = mx.sym.one_hot(mx.sym.ones_like(target_embed_lengths) * C.PAD_ID, self.target_vocab_size)
 
         # Get last state from source (batch_size, num_target_embed)
         enc_last_hidden = None
@@ -636,8 +642,14 @@ class RecurrentDecoder(Decoder):
 
         # initial word_vec_prev_prediction (i.e. <BOS>): (batch_size, rnn_num_hidden)
         word_vec_prev_prediction = target_embed[0]
-        # hidden_all: target_embed_max_length * (batch_size, rnn_num_hidden)
+        # hidden_states: target_embed_max_length * (batch_size, rnn_num_hidden)
         hidden_states = []  # type: List[mx.sym.Symbol]
+        # word_dists: target_embed_max_length * (batch_size, vocab_size)
+        word_dists = []
+        # decoded_lengths: (batch_size,)
+        decoded_lengths = mx.sym.zeros_like(target_embed_lengths)
+        # mask: (batch_size,)
+        prev_mask = mx.sym.zeros_like(target_embed_lengths)
         # TODO: possible alternative: feed back the context vector instead of the hidden (see lamtram)
         self.reset()
         for seq_idx in range(target_embed_max_length):
@@ -671,11 +683,15 @@ class RecurrentDecoder(Decoder):
                 if self.instantiate_hidden is None:
                     word_vec_prev_prediction = hidden_prev
                 else:
+                    # curr_mask: (batch_size, 1)
+                    curr_mask = mx.sym.expand_dims(prev_mask, axis=1)
                     # logits: (batch_size, vocab_size)
                     logits = self.output_layer(hidden_prev)
                     if self.instantiate_hidden == C.ARGMAX_NAME:
                         # word_prev_prediction: (batch_size, 1)
                         word_prev_prediction = mx.sym.argmax(logits, axis=1, keepdims=True)
+                        # word_prev_dist: (batch_size, vocab_size)
+                        word_prev_dist = mx.sym.one_hot(word_prev_prediction, self.target_vocab_size)
                         # word_vec_prev_prediction: (batch_size, 1, rnn_num_hidden)
                         word_vec_prev_prediction, _, _ = self.embedding_target.encode(data=word_prev_prediction,
                                                                                       data_length=None,
@@ -687,6 +703,8 @@ class RecurrentDecoder(Decoder):
                             logits = logits / self.softmax_temperature
                         # word_prev_dist: (batch_size, vocab_size)
                         word_prev_dist = mx.sym.softmax(logits, axis=1)
+                        # padding
+#                        word_prev_dist = mx.sym.broadcast_mul(word_prev_dist, 1 - curr_mask) + mx.sym.broadcast_mul(padding_dist, curr_mask)
                         # word_prev_prediction: (batch_size, 1)
                         word_prev_prediction = mx.sym.sample_multinomial(word_prev_dist, shape=1)
                         # word_vec_prev_prediction: (batch_size, 1, rnn_num_hidden)
@@ -720,18 +738,31 @@ class RecurrentDecoder(Decoder):
                                                               noise_scale=self.gumbel_noise_scale, st=True, axis=1)
                         # word_vec_prev_prediction: (batch_size, rnn_num_hidden)
                         word_vec_prev_prediction = mx.sym.dot(word_prev_dist, self.embedding_target.embed_weight)
+                    # update word_dists
+                    word_dists.append(word_prev_dist)
+                    # decoded_lengths: (batch_size,)
+                    decoded_lengths = decoded_lengths + mx.sym.logical_not(prev_mask)
+                    # word_prev_index: (batch_size,)
+                    word_prev_index = mx.sym.argmax(word_prev_dist, axis=1)
+                    # eos_mask: (batch_size,)
+                    eos_mask = mx.sym.broadcast_logical_or(word_prev_index == C.EOS_ID, word_prev_index == C.PAD_ID)
+                    prev_mask = mx.sym.broadcast_logical_or(prev_mask, eos_mask)
 
             if self.decode_sequence_as_instantiated_hidden:
                 hidden_states.append(word_vec_prev_prediction)
             else:
                 hidden_states.append(state.hidden)
 
+        # concatenate along time axis: (batch_size, target_embed_max_length, vocab_size)
+        if word_dists:
+            self.target_word_dist = mx.sym.stack(*word_dists, axis=1, name='%sword_dist' % self.prefix)
         # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
         target_hidden = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
         # lengths: (batch_size,)
-        lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
+#        decoded_lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
+        decoded_lengths = target_embed_lengths if self.teacher_forcing_probability == 1.0 else decoded_lengths
 
-        return target_hidden, lengths, target_embed_max_length
+        return target_hidden, decoded_lengths, target_embed_max_length
 
     def decode_step(self,
                     step: int,

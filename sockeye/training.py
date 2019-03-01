@@ -116,6 +116,7 @@ class TrainingModel(model.SockeyeModel):
 
         if self.instantiate_hidden is not None:
             self.decoder.set_instantiate_hidden(instantiate_hidden=self.instantiate_hidden,
+                                                target_vocab_size=self.config.vocab_target_size,
                                                 output_layer=self.output_layer,
                                                 embedding_target=self.embedding_target,
                                                 softmax_temperature=self.config.softmax_temperature,
@@ -129,21 +130,26 @@ class TrainingModel(model.SockeyeModel):
             if self.reconstruction == C.BILINGUAL:
                 reconstruction_labels = mx.sym.reshape(data=source_words, shape=(-1,))
             elif self.reconstruction == C.MONOLINGUAL:
+                self.custom_loss = loss.CustomCrossEntropyLoss(self.config.config_loss)
+                # match_mono_data: (batch_size, 1)
+                self.match_mono_data = source_words.slice_axis(axis=1, begin=0, end=1) == target.slice_axis(axis=1, begin=1, end=2)
                 # language model decoders
-                # target LM-0 = EN <2sw> | LM-1 = SW <2en>
-                source_2lang_id = [10, 9] # 9: <2sw>, 10: <2en>
+                # target LM-0 = EN <2en> | LM-1 = FR <2fr>
+                source_2lang_id = [C.EN_LANG_TAG_ID, C.FR_LANG_TAG_ID]
                 self.lm_num = 2
                 self.match_lm_lang = [None] * self.lm_num
                 self.lm_decoder = [None] * self.lm_num
+                self.lm_embed_source = [None] * self.lm_num
                 self.lm_output_layer = [None] * self.lm_num
                 for i in range(self.lm_num):
                     # match_lm_lang: (batch_size, 1)
                     self.match_lm_lang[i] = source_words.slice_axis(axis=1, begin=0, end=1) == source_2lang_id[i]
+                    self.match_lm_lang[i] = mx.sym.broadcast_logical_and(self.match_lm_lang[i], self.match_mono_data)
                     lm_prefix = C.LANGUAGE_MODEL_PREFIX + str(i) + "_"
-                    self.lm_decoder[i] = decoder.get_decoder(self.lm_config.config_decoder,
+                    self.lm_decoder[i] = decoder.get_decoder(config=self.lm_config.config_decoder,
                                                              prefix=self.prefix + lm_prefix)
-                    lm_out_weight_target = mx.sym.Variable(self.prefix + lm_prefix + "target_output_weight",
-                                                           shape=(self.lm_config.vocab_target_size, self.lm_decoder[i].get_num_hidden()))
+                    self.lm_embed_source[i], _, lm_out_weight_target = self.get_embed_weights(config=self.lm_config,
+                                                                                              prefix=self.prefix + lm_prefix)
                     self.lm_output_layer[i] = layers.OutputLayer(hidden_size=self.lm_decoder[i].get_num_hidden(),
                                                                  vocab_size=self.lm_config.vocab_target_size,
                                                                  weight=lm_out_weight_target,
@@ -253,8 +259,9 @@ class TrainingModel(model.SockeyeModel):
                                                                 fw_encoded_length,
                                                                 fw_encoded_seq_len,
                                                                 target_embed,
-                                                                fw_encoded_length,
+                                                                target_embed_length,
                                                                 target_embed_seq_len)
+            target_word_dist = self.decoder.target_word_dist
 
             # backward encoder
             # bw_encoded: (batch_size, max_seq_len, encoder_depth)
@@ -330,13 +337,20 @@ class TrainingModel(model.SockeyeModel):
 
             elif self.reconstruction == C.MONOLINGUAL:
                 ###### Language Modeling ######
+                # bos_indices: (batch_size,)
+                bos_indices = mx.sym.ones_like(mx.sym.sum(target, axis=1)) * C.BOS_ID
+                # bos_dist: (batch_size, 1, target_vocab_size)
+                bos_dist = mx.sym.expand_dims(mx.sym.one_hot(bos_indices, self.lm_config.vocab_source_size), axis=1)
+                # <BOS> y1 y2 ... yn <EOS>
+                # target_word_dist: (batch_size, max_seq_len, target_vocab_size)
+                target_word_dist = mx.sym.concat(bos_dist, target_word_dist.slice_axis(axis=1, begin=0, end=-1), dim=1)
                 # fw_decoded_bos_1: <BOS>
-                fw_decoded_bos_1 = target_embed.slice_axis(axis=1, begin=0, end=1)
+#                fw_decoded_bos_1 = target_embed.slice_axis(axis=1, begin=0, end=1)
                 # fw_decoded_bos_2: y1 y2 ... yn <EOS>
-                fw_decoded_bos_2 = fw_decoded.slice_axis(axis=1, begin=0, end=-1)
+#                fw_decoded_bos_2 = fw_decoded.slice_axis(axis=1, begin=0, end=-1)
                 # fw_decoded_bos: <BOS> y1 y2 ... yn <EOS>
-                fw_decoded_bos = mx.sym.concat(fw_decoded_bos_1, fw_decoded_bos_2, dim=1)
-                fw_decoded_bos = mx.sym.BlockGrad(fw_decoded_bos)
+#                fw_decoded_bos = mx.sym.concat(fw_decoded_bos_1, fw_decoded_bos_2, dim=1)
+#                fw_decoded_bos = mx.sym.BlockGrad(fw_decoded_bos)
 
                 # fw_decoded: (batch_size * max_seq_len, decoder_depth)
                 fw_decoded = mx.sym.reshape(data=fw_decoded, shape=(-3, 0))
@@ -347,15 +361,17 @@ class TrainingModel(model.SockeyeModel):
 
                 lm_logits_mix = 0
                 for i in range(self.lm_num):
+                    # lm_source_embed: (batch_size, max_seq_len, source_embed_size)
+                    lm_source_embed = mx.sym.dot(target_word_dist, self.lm_embed_source[i])
                     # language model
                     self.lm_decoder[i].set_teacher_forcing_probability(1.0)
                     self.lm_decoder[i].decode_sequence_as_instantiated_hidden = False
                     # lm_decoded: (batch_size, max_seq_len, lm_decoder_depth)
                     # lm_decoded: y1 y2 ... yn <EOS>
-                    (lm_decoded, _, _) = self.lm_decoder[i].decode_sequence(fw_encoded,
+                    (lm_decoded, _, _) = self.lm_decoder[i].decode_sequence(mx.sym.zeros_like(fw_encoded),
                                                                             fw_encoded_length,
                                                                             fw_encoded_seq_len,
-                                                                            fw_decoded_bos,
+                                                                            lm_source_embed,
                                                                             fw_decoded_length,
                                                                             fw_decoded_seq_len)
 
@@ -371,11 +387,11 @@ class TrainingModel(model.SockeyeModel):
                     # only enable predictions for this language
                     lm_logits_mix = lm_logits_mix + mx.sym.broadcast_mul(lm_logits, lm_mask)
 
-                language_model_loss_output = self.model_loss.get_loss(lm_logits_mix,
-#                                                                      mx.sym.softmax(fw_logits, axis=1),
-                                                                      mx.sym.argmax(fw_logits, axis=1),
-                                                                      grad_scale=1.0-self.reconstruction_loss_weight,
-                                                                      prefix=C.LANGUAGE_MODEL_PREFIX + str(i) + "_")
+                language_model_loss_output = self.custom_loss.get_loss(lm_logits_mix,
+#                                                                       mx.sym.softmax(fw_logits, axis=1),
+                                                                       mx.sym.argmax(fw_logits, axis=1),
+                                                                       grad_scale=1 - self.reconstruction_loss_weight,
+                                                                       prefix=C.LANGUAGE_MODEL_PREFIX)
 
                 ###### Reconstruction ######
                 # backward decoder
@@ -397,13 +413,38 @@ class TrainingModel(model.SockeyeModel):
                 # bw_logits: (batch_size * max_seq_len, source_vocab_size)
                 bw_logits = self.output_layer(bw_decoded)
 
-                reconstruction_loss_output = self.model_loss.get_loss(bw_logits,
-                                                                      labels,
-                                                                      grad_scale=self.reconstruction_loss_weight,
-                                                                      prefix=C.RECONSTRUCTION_PREFIX)
+                # match_mono_data: (batch_size * max_seq_len, 1)
+                match_mono_data = self.match_mono_data.tile(reps=(target_embed_seq_len)).reshape(shape=(-3, -1))
+                bw_logits = mx.sym.broadcast_mul(bw_logits, match_mono_data)
+
+                reconstruction_loss_output = self.custom_loss.get_loss(bw_logits,
+                                                                       labels,
+                                                                       grad_scale=self.reconstruction_loss_weight,
+                                                                       prefix=C.RECONSTRUCTION_PREFIX)
 
                 ###### Translation ######
-                translation_loss_output = self.model_loss.get_loss(fw_logits, labels, grad_scale=0)
+                # forward decoder (teacher forcing)
+                self.decoder.set_teacher_forcing_probability(1.0)
+                self.decoder.decode_sequence_as_instantiated_hidden = False
+                self.decoder.block_grad_prev_prediction = False
+                # target_decoded: (batch-size, max_seq_len, decoder_depth)
+                # target_decoded: y1 y2 ... yn <EOS>
+                (target_decoded, _, _) = self.decoder.decode_sequence(fw_encoded,
+                                                                      fw_encoded_length,
+                                                                      fw_encoded_seq_len,
+                                                                      target_embed,
+                                                                      target_embed_length,
+                                                                      target_embed_seq_len)
+
+                # target_decoded: (batch_size * max_seq_len, decoder_depth)
+                target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
+
+                # output layer
+                # logits: (batch_size * max_seq_len, target_vocab_size)
+                logits = self.output_layer(target_decoded)
+                logits = mx.sym.broadcast_mul(logits, 1 - match_mono_data)
+
+                translation_loss_output = self.model_loss.get_loss(logits, labels, grad_scale=1)
 
                 loss_output = language_model_loss_output + reconstruction_loss_output + translation_loss_output
 
@@ -531,7 +572,10 @@ class TrainingModel(model.SockeyeModel):
 
     @property
     def loss(self):
-        return self.model_loss
+        if self.reconstruction == C.MONOLINGUAL:
+            return self.custom_loss
+        else:
+            return self.model_loss
 
     @property
     def optimizer(self) -> Union[mx.optimizer.Optimizer, SockeyeOptimizer]:
@@ -1160,7 +1204,11 @@ class EarlyStoppingTrainer:
                         loss: loss.Loss) -> Tuple[mx.metric.EvalMetric,
                                                   mx.metric.EvalMetric,
                                                   Optional[mx.metric.EvalMetric]]:
-        metric_train = self._create_eval_metric_composite(metrics, self.model.metric_output_names(is_train=True))
+        if self.model.reconstruction is not None:
+            metric_train = loss.create_metric(self.model.metric_output_names(is_train=True))
+        else:
+            metric_train = self._create_eval_metric_composite(metrics, self.model.metric_output_names(is_train=True))
+
         metric_val = self._create_eval_metric_composite(metrics, self.model.metric_output_names(is_train=False))
         # If optimizer requires it, track loss as metric
         if isinstance(optimizer, SockeyeOptimizer):

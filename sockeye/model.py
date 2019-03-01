@@ -202,7 +202,7 @@ class SockeyeModel:
         with open(fname, "w") as out:
             out.write(__version__)
 
-    def _get_embed_weights(self, prefix: str) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, mx.sym.Symbol]:
+    def get_embed_weights(self, config: ModelConfig, prefix: str) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, mx.sym.Symbol]:
         """
         Returns embedding parameters for source and target.
         When source and target embeddings are shared, they are created here and passed in to each side,
@@ -212,28 +212,28 @@ class SockeyeModel:
         :return: Tuple of source and target parameter symbols.
         """
         w_embed_source = mx.sym.Variable(prefix + C.SOURCE_EMBEDDING_PREFIX + "weight",
-                                         shape=(self.config.config_embed_source.vocab_size,
-                                                self.config.config_embed_source.num_embed))
+                                         shape=(config.config_embed_source.vocab_size,
+                                                config.config_embed_source.num_embed))
         w_embed_target = mx.sym.Variable(prefix + C.TARGET_EMBEDDING_PREFIX + "weight",
-                                         shape=(self.config.config_embed_target.vocab_size,
-                                                self.config.config_embed_target.num_embed))
+                                         shape=(config.config_embed_target.vocab_size,
+                                                config.config_embed_target.num_embed))
 
         w_out_target = mx.sym.Variable(prefix + "target_output_weight",
-                                       shape=(self.config.vocab_target_size, self.decoder.get_num_hidden()))
+                                       shape=(config.vocab_target_size, self.decoder.get_num_hidden()))
 
-        if self.config.weight_tying:
-            if C.WEIGHT_TYING_SRC in self.config.weight_tying_type \
-                    and C.WEIGHT_TYING_TRG in self.config.weight_tying_type:
+        if config.weight_tying:
+            if C.WEIGHT_TYING_SRC in config.weight_tying_type \
+                    and C.WEIGHT_TYING_TRG in config.weight_tying_type:
                 logger.info("Tying the source and target embeddings.")
                 w_embed_source = w_embed_target = mx.sym.Variable(prefix + C.SHARED_EMBEDDING_PREFIX + "weight",
-                                                                  shape=(self.config.config_embed_source.vocab_size,
-                                                                         self.config.config_embed_source.num_embed))
+                                                                  shape=(config.config_embed_source.vocab_size,
+                                                                         config.config_embed_source.num_embed))
 
-            if C.WEIGHT_TYING_SOFTMAX in self.config.weight_tying_type:
+            if C.WEIGHT_TYING_SOFTMAX in config.weight_tying_type:
                 logger.info("Tying the target embeddings and output layer parameters.")
-                utils.check_condition(self.config.config_embed_target.num_embed == self.decoder.get_num_hidden(),
+                utils.check_condition(config.config_embed_target.num_embed == self.decoder.get_num_hidden(),
                                       "Weight tying requires target embedding size and decoder hidden size " +
-                                      "to be equal: %d vs. %d" % (self.config.config_embed_target.num_embed,
+                                      "to be equal: %d vs. %d" % (config.config_embed_target.num_embed,
                                                                   self.decoder.get_num_hidden()))
                 w_out_target = w_embed_target
 
@@ -243,6 +243,17 @@ class SockeyeModel:
         self._embed_weight_target_name = w_embed_target.name
         self._out_weight_target_name = w_out_target.name
         return w_embed_source, w_embed_target, w_out_target
+
+    def _get_embed_weights(self, prefix: str) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, mx.sym.Symbol]:
+        """
+        Returns embedding parameters for source and target.
+        When source and target embeddings are shared, they are created here and passed in to each side,
+        instead of being created in the Embedding constructors.
+
+        :param prefix: Prefix.
+        :return: Tuple of source and target parameter symbols.
+        """
+        return self.get_embed_weights(self.config, prefix)
 
     def get_source_embed_params(self) -> Optional[mx.nd.NDArray]:
         if self.params is None:

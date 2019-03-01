@@ -197,3 +197,103 @@ class CrossEntropyMetric(EvalMetric):
                 self.num_inst += batch_size
 
             self.sum_metric += ce.asscalar()
+
+
+class CustomCrossEntropyLoss(Loss):
+    """
+    Computes the cross-entropy loss.
+
+    :param loss_config: Loss configuration.
+    """
+
+    def __init__(self, loss_config: LossConfig) -> None:
+        logger.info("Loss: CustomCrossEntropy(normalization_type=%s, label_smoothing=%s)",
+                    loss_config.normalization_type, loss_config.label_smoothing)
+        self.loss_config = loss_config
+
+    @staticmethod
+    def cross_entropy(logprob, labels):
+        ce = -mx.sym.pick(logprob, labels, axis=1)
+        return ce
+
+    @staticmethod
+    def cross_entropy_smoothed(logprob, labels, alpha, num_classes):
+        ce = CustomCrossEntropyLoss.cross_entropy(logprob, labels)
+        # gain for each incorrect class
+        per_class_gain = alpha / (num_classes - 1)
+        # discounted loss for correct class
+        ce = ce * (1 - alpha - per_class_gain)
+        # add gain for incorrect classes to total cross-entropy
+        ce = ce - mx.sym.sum(logprob * per_class_gain, axis=-1, keepdims=False)
+        return ce
+
+    def get_loss(self,
+                 logits: mx.sym.Symbol,
+                 labels: mx.sym.Symbol,
+                 grad_scale: float = 1.0,
+                 prefix: str = '') -> List[mx.sym.Symbol]:
+        """
+        Returns loss and softmax output symbols given logits and integer-coded labels.
+
+        :param logits: Shape: (batch_size * target_seq_len, target_vocab_size).
+        :param labels: Shape: (batch_size * target_seq_len,).
+        :param grad_scale: Scale the gradient by a float factor.
+        :param prefix: Name prefix for the output.
+        :return: List of loss symbol.
+        """
+        # logprob: (batch_size * target_seq_len, target_vocab_size)
+        logprob = mx.sym.log_softmax(logits, axis=1)
+
+        # ce: (batch_size * target_seq_len,)
+        if self.loss_config.label_smoothing > 0.0:
+            ce = self.cross_entropy_smoothed(logprob, labels,
+                                             alpha=self.loss_config.label_smoothing,
+                                             num_classes=self.loss_config.vocab_size)
+        else:
+            ce = self.cross_entropy(logprob, labels)
+
+        # ignore pad tokens
+        valid = (labels != C.PAD_ID)
+        ce = ce * valid
+
+        # normalization
+        if self.loss_config.normalization_type == C.LOSS_NORM_VALID:
+            ce = mx.sym.broadcast_div(ce, mx.sym.sum(valid))
+
+        return [mx.sym.MakeLoss(data=ce,
+                                grad_scale=grad_scale,
+                                name=prefix + C.SOFTMAX_NAME)]
+
+    def create_metric(self, output_names) -> "CustomPerplexityMetric":
+        return CustomPerplexityMetric(self.loss_config, output_names=output_names)
+
+class CustomPerplexityMetric(EvalMetric):
+    """
+    Version of the cross entropy metric that ignores padding tokens.
+
+    :param loss_config: The configuration used for the corresponding loss.
+    :param name: Name of this metric instance for display.
+    :param output_names: Name of predictions that should be used when updating with update_dict.
+    :param label_names: Name of labels that should be used when updating with update_dict.
+    """
+
+    def __init__(self,
+                 loss_config: LossConfig,
+                 name: str = C.CUSTOM_PERPLEXITY,
+                 output_names: Optional[List[str]] = None,
+                 label_names: Optional[List[str]] = None) -> None:
+        super().__init__(name, output_names=output_names, label_names=label_names)
+        self.loss_config = loss_config
+
+    def update(self, labels, preds):
+        for label, pred in zip(labels, preds):
+            batch_size = label.shape[0]
+            ce = mx.nd.exp(mx.nd.sum(pred))
+            if self.loss_config.normalization_type == C.LOSS_NORM_VALID:
+                self.num_inst += 1
+            elif self.loss_config.normalization_type == C.LOSS_NORM_BATCH:
+                # When not normalizing, we divide by the batch size (number of sequences)
+                # NOTE: This is different from MXNet's metrics
+                self.num_inst += batch_size
+
+            self.sum_metric += ce.asscalar()
