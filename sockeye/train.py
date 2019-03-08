@@ -107,6 +107,20 @@ def check_arg_compatibility(args: argparse.Namespace):
     if args.decoder_only:
         check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
                         "Decoder pre-training currently supports RNN decoders only.")
+    elif args.sampling_objectives is not None:
+        check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
+                        "Sampling objectives currently support RNN decoders only.")
+        if not args.weight_tying or args.weight_tying_type != C.WEIGHT_TYING_SRC_TRG_SOFTMAX:
+            logger.info("Source embeddings, target embeddings and the target softmax weight matrix "
+                        "will be tied when training bidirectional NMT models with sampling objectives.")
+            args.weight_tying = True
+            args.weight_tying_type = C.WEIGHT_TYING_SRC_TRG_SOFTMAX
+    check_condition(not (args.decoder_only and args.sampling_objectives is not None),
+                    "Pre-training the decoder and training with sampling objectives are mutually exclusive.")
+
+    if args.instantiate_hidden is not None:
+        check_condition(args.decoder != C.TRANSFORMER_TYPE and args.decoder != C.CONVOLUTION_TYPE,
+                        "Instantiating hidden states currently supports RNN decoders only.")
 
 
 def check_resume(args: argparse.Namespace, output_folder: str) -> bool:
@@ -343,6 +357,7 @@ def create_data_iters_and_vocabs(args: argparse.Namespace,
             batch_by_words=batch_by_words,
             batch_num_devices=batch_num_devices,
             fill_up=args.fill_up,
+            highlight_diff=C.HIGHLIGHT in args.sampling_objectives,
             max_seq_len_source=max_seq_len_source,
             max_seq_len_target=max_seq_len_target,
             bucketing=not args.no_bucketing,
@@ -648,6 +663,8 @@ def create_model_config(args: argparse.Namespace,
                                      weight_tying=args.weight_tying,
                                      weight_tying_type=args.weight_tying_type if args.weight_tying else None,
                                      weight_normalization=args.weight_normalization,
+                                     softmax_temperature=args.softmax_temperature,
+                                     gumbel_noise_scale=args.gumbel_noise_scale,
                                      lhuc=args.lhuc is not None)
     return model_config
 
@@ -675,7 +692,11 @@ def create_training_model(config: model.ModelConfig,
                                             default_bucket_key=train_iter.default_bucket_key,
                                             bucketing=not args.no_bucketing,
                                             gradient_compression_params=gradient_compression_params(args),
-                                            fixed_param_names=args.fixed_param_names)
+                                            fixed_param_names=args.fixed_param_names,
+                                            sampling_objectives=args.sampling_objectives,
+                                            sampling_loss_weights=args.sampling_loss_weights,
+                                            instantiate_hidden=args.instantiate_hidden,
+                                            decoder_block_grad_prev_prediction=args.decoder_block_grad_prev_prediction)
 
     return training_model
 
@@ -881,6 +902,7 @@ def train(args: argparse.Namespace):
                     mxmonitor_pattern=args.monitor_pattern,
                     mxmonitor_stat_func=args.monitor_stat_func,
                     allow_missing_parameters=args.allow_missing_params or model_config.lhuc,
+                    allow_extra_parameters=args.allow_extra_params,
                     existing_parameters=args.params)
 
 

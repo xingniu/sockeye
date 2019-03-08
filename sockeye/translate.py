@@ -113,7 +113,8 @@ def run_translate(args: argparse.Namespace):
                            chunk_size=args.chunk_size,
                            input_file=args.input,
                            input_factors=args.input_factors,
-                           input_is_json=args.json_input)
+                           input_is_json=args.json_input,
+                           analysis_mode=args.analysis_mode)
 
 
 def make_inputs(input_file: Optional[str],
@@ -162,7 +163,8 @@ def read_and_translate(translator: inference.Translator,
                        chunk_size: Optional[int],
                        input_file: Optional[str] = None,
                        input_factors: Optional[List[str]] = None,
-                       input_is_json: bool = False) -> None:
+                       input_is_json: bool = False,
+                       analysis_mode: bool = False) -> None:
     """
     Reads from either a file or stdin and translates each line, calling the output_handler with the result.
 
@@ -172,6 +174,7 @@ def read_and_translate(translator: inference.Translator,
     :param input_file: Optional path to file which will be translated line-by-line if included, if none use stdin.
     :param input_factors: Optional list of paths to files that contain source factors.
     :param input_is_json: Whether the input is in json format.
+    :param analysis_mode: 
     """
     batch_size = translator.batch_size
     if chunk_size is None:
@@ -191,7 +194,10 @@ def read_and_translate(translator: inference.Translator,
 
     total_time, total_lines = 0.0, 0
     for chunk in grouper(make_inputs(input_file, translator, input_is_json, input_factors), size=chunk_size):
-        chunk_time = translate(output_handler, chunk, translator)
+        if analysis_mode:
+            chunk_time = analyze(chunk, translator)
+        else:
+            chunk_time = translate(output_handler, chunk, translator)
         total_lines += len(chunk)
         total_time += chunk_time
 
@@ -222,6 +228,20 @@ def translate(output_handler: OutputHandler,
         output_handler.handle(trans_input, trans_output, batch_time)
     return total_time
 
+def analyze(trans_inputs: List[inference.TranslatorInput],
+            translator: inference.Translator) -> float:
+    """
+    Analyze each line from source_data, calling output handler after translating a batch.
+
+    :param trans_inputs: A enumerable list of translator inputs.
+    :param translator: The translator that will be used for each line of input.
+    :return: Total time taken.
+    """
+    tic = time.time()
+    analysis_outputs = translator.analyze(trans_inputs)
+    total_time = time.time() - tic
+    # TODO: analysis_outputs
+    return total_time
 
 if __name__ == '__main__':
     main()

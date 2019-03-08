@@ -55,6 +55,10 @@ class TrainingModel(model.SockeyeModel):
             unrolled to the full length.
     :param gradient_compression_params: Optional dictionary of gradient compression parameters.
     :param fixed_param_names: Optional list of params to fix during training (i.e. their values will not be trained).
+    :param sampling_objectives: Train or fine-tune bidirectional NMT models with sampling objectives.
+    :param sampling_loss_weights: The weights for sampling losses.
+    :param instantiate_hidden: Use instantiated hidden states as previous target embeddings.
+    :param decoder_block_grad_prev_prediction: Blocks gradient computation for the previous prediction in the decoder.
     """
 
     def __init__(self,
@@ -66,11 +70,19 @@ class TrainingModel(model.SockeyeModel):
                  default_bucket_key: Tuple[int, int],
                  bucketing: bool,
                  gradient_compression_params: Optional[Dict[str, Any]] = None,
-                 fixed_param_names: Optional[List[str]] = None) -> None:
+                 fixed_param_names: Optional[List[str]] = None,
+                 sampling_objectives: Optional[List[str]] = None,
+                 sampling_loss_weights: Optional[List[float]] = [0.5],
+                 instantiate_hidden: str = None,
+                 decoder_block_grad_prev_prediction: bool = False) -> None:
         super().__init__(config)
         self.context = context
         self.output_dir = output_dir
         self.fixed_param_names = fixed_param_names
+        self.sampling_objectives = sampling_objectives
+        self.sampling_loss_weights = sampling_loss_weights
+        self.instantiate_hidden = instantiate_hidden
+        self.decoder_block_grad_prev_prediction = decoder_block_grad_prev_prediction
         self._bucketing = bucketing
         self._gradient_compression_params = gradient_compression_params
         self._initialize(provide_data, provide_label, default_bucket_key)
@@ -83,13 +95,51 @@ class TrainingModel(model.SockeyeModel):
         """
         Initializes model components, creates training symbol and module, and binds it.
         """
-        source = mx.sym.Variable(C.SOURCE_NAME)
-        source_words = source.split(num_outputs=self.config.config_embed_source.num_factors,
-                                    axis=2, squeeze_axis=True)[0]
+        if C.HIGHLIGHT in self.sampling_objectives:
+            # raw_source: (batch_size, seq_length, num_factors+1)
+            raw_source = mx.sym.Variable(C.SOURCE_NAME)
+            # source: (batch_size, seq_length, num_factors)
+            source = raw_source.slice_axis(axis=2, begin=0, end=self.config.config_embed_source.num_factors)
+            # highlight_labels: (batch_size*seq_length)
+            highlight_labels = raw_source.slice_axis(axis=2, begin=self.config.config_embed_source.num_factors, end=None)
+            highlight_labels = highlight_labels.reshape(shape=(-1,))
+        else:
+            # source: (batch_size, seq_length, num_factors)
+            source = mx.sym.Variable(C.SOURCE_NAME)
+        # source_words: (batch_size, seq_length)
+        source_words = source.slice_axis(axis=2, begin=0, end=1).squeeze()
         source_length = utils.compute_lengths(source_words)
+        # source: (batch_size, seq_length)
         target = mx.sym.Variable(C.TARGET_NAME)
         target_length = utils.compute_lengths(target)
-        labels = mx.sym.reshape(data=mx.sym.Variable(C.TARGET_LABEL_NAME), shape=(-1,))
+        # raw_labels: (batch_size, seq_length)
+        raw_labels = mx.sym.Variable(C.TARGET_LABEL_NAME)
+        # labels: (batch_size*seq_length)
+        labels = mx.sym.reshape(data=raw_labels, shape=(-1,))
+        # source_tgt: (batch_size, seq_length, num_factors)
+        if self.config.config_embed_source.num_factors > 1:
+            source_tgt = mx.sym.concat(raw_labels.expand_dims(axis=2), source.slice_axis(axis=2, begin=1, end=None), dim=2)
+        else:
+            source_tgt = labels.expand_dims(axis=2)
+
+        if self.instantiate_hidden is not None:
+            self.decoder.set_instantiate_hidden(instantiate_hidden=self.instantiate_hidden,
+                                                output_layer=self.output_layer,
+                                                embedding_target=self.embedding_target,
+                                                softmax_temperature=self.config.softmax_temperature,
+                                                gumbel_noise_scale=self.config.gumbel_noise_scale)
+
+        if C.RECONSTRUCTION in self.sampling_objectives:
+            reconstruction_labels = mx.sym.reshape(data=source_words, shape=(-1,))
+
+        num_losses = len(self.sampling_objectives)
+        if len(self.sampling_loss_weights) == 1:
+            self.sampling_loss_weight_total = self.sampling_loss_weights[0]
+            self.sampling_loss_weights = [self.sampling_loss_weight_total / num_losses] * num_losses
+        else:
+            self.sampling_loss_weight_total = sum(self.sampling_loss_weights)
+        self.objective_weight = {self.sampling_objectives[i]: self.sampling_loss_weights[i] for i in range(num_losses)}
+        print(self.objective_weight)
 
         self.model_loss = loss.get_loss(self.config.config_loss)
 
@@ -104,7 +154,7 @@ class TrainingModel(model.SockeyeModel):
         utils.check_condition(provide_label_names == label_names,
                               "incompatible provide_label: %s, names should be %s" % (provide_label_names, label_names))
 
-        def sym_gen(seq_lens):
+        def sym_gen_standard(seq_lens):
             """
             Returns a (grouped) loss symbol given source & target input lengths.
             Also returns data and label names for the BucketingModule.
@@ -131,8 +181,12 @@ class TrainingModel(model.SockeyeModel):
 
             # decoder
             # target_decoded: (batch-size, target_len, decoder_depth)
-            target_decoded = self.decoder.decode_sequence(source_encoded, source_encoded_length, source_encoded_seq_len,
-                                                          target_embed, target_embed_length, target_embed_seq_len)
+            (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded,
+                                                                  source_encoded_length,
+                                                                  source_encoded_seq_len,
+                                                                  target_embed,
+                                                                  target_embed_length,
+                                                                  target_embed_seq_len)
 
             # target_decoded: (batch_size * target_seq_len, decoder_depth)
             target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
@@ -144,6 +198,190 @@ class TrainingModel(model.SockeyeModel):
             loss_output = self.model_loss.get_loss(logits, labels)
 
             return mx.sym.Group(loss_output), data_names, label_names
+
+        def sym_gen_sampling(seq_lens):
+            """
+            Returns a (grouped) loss symbol given source & target input lengths.
+            Also returns data and label names for the BucketingModule.
+            """
+            source_seq_len, target_seq_len = seq_lens
+
+            # source embedding
+            # source_embed: <2Y> x1 x2 ... xn <EOS>
+            (source_embed,
+             source_embed_length,
+             source_embed_seq_len) = self.embedding_source.encode(source, source_length, source_seq_len)
+
+            # target embedding
+            # target_embed: <BOS> <2X> y1 y2 ... yn
+            (target_embed,
+             target_embed_length,
+             target_embed_seq_len) = self.embedding_target.encode(target, target_length, target_seq_len)
+            
+            # source_tgt embedding
+            # source_tgt_embed: <2X> y1 y2 ... yn <EOS>
+            # TODO: length
+            (source_tgt_embed,
+             source_tgt_embed_length,
+             source_tgt_embed_seq_len) = self.embedding_source.encode(source_tgt, source_length, source_seq_len)
+
+            # encoder
+            # source_encoded: (batch_size, max_seq_len, encoder_depth)
+            # source_encoded: <2Y> x1 x2 ... xn <EOS>
+            # source_encoded_length = source_length
+            (source_encoded,
+             source_encoded_length,
+             source_encoded_seq_len) = self.encoder.encode(source_embed,
+                                                           source_embed_length,
+                                                           source_embed_seq_len)
+
+            # primary decoder (teacher forcing)
+            self.decoder.set_teacher_forcing_probability(1.0)
+            self.decoder.decode_sequence_as_instantiated_hidden = False
+            self.decoder.block_grad_prev_prediction = False
+            # target_decoded: (batch-size, max_seq_len, decoder_depth)
+            # target_decoded: <2X> y1 y2 ... yn <EOS>
+            (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded,
+                                                                  source_encoded_length,
+                                                                  source_encoded_seq_len,
+                                                                  target_embed,
+                                                                  target_embed_length,
+                                                                  target_embed_seq_len)
+
+            # target_decoded: (batch_size * max_seq_len, decoder_depth)
+            target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
+
+            # output layer
+            # logits: (batch_size * max_seq_len, target_vocab_size)
+            logits = self.output_layer(target_decoded)
+
+            translation_loss_output = self.model_loss.get_loss(logits,
+                                                               labels,
+                                                               grad_scale=1.0-self.sampling_loss_weight_total)
+
+            # sampling decoder (no teacher forcing)
+            self.decoder.set_teacher_forcing_probability(0.0)
+            self.decoder.decode_sequence_as_instantiated_hidden = self.instantiate_hidden is not None
+            self.decoder.block_grad_prev_prediction = self.decoder_block_grad_prev_prediction
+            # sampling_decoded: (batch-size, max_seq_len, num_target_embed)
+            # sampling_decoded: <2X> y1 y2 ... yn <EOS>
+            # sampling_decoded_length = max_seq_len
+            (sampling_decoded,
+             sampling_decoded_length,
+             sampling_decoded_seq_len) = self.decoder.decode_sequence(source_encoded,
+                                                                      source_encoded_length,
+                                                                      source_encoded_seq_len,
+                                                                      target_embed,
+                                                                      source_encoded_length,
+                                                                      target_embed_seq_len)
+
+            loss_output = translation_loss_output
+
+            if C.HIGHLIGHT in self.sampling_objectives:
+                highlight_loss_output = self.model_loss.get_loss(logits,
+                                                                 labels=highlight_labels,
+                                                                 grad_scale=self.objective_weight[C.HIGHLIGHT],
+                                                                 prefix=C.HIGHLIGHT_PREFIX)
+
+                loss_output += highlight_loss_output
+
+            if C.RECONSTRUCTION in self.sampling_objectives:
+                # source_embed_bos_1: <BOS>
+                source_embed_bos_1 = target_embed.slice_axis(axis=1, begin=0, end=1)
+                # source_embed_bos_2: <2Y> x1 x2 ... xn <EOS>
+                source_embed_bos_2 = source_embed.slice_axis(axis=1, begin=0, end=-1)
+                # source_embed_bos: <BOS> <2Y> x1 x2 ... xn <EOS>
+                source_embed_bos = mx.sym.concat(source_embed_bos_1, source_embed_bos_2, dim=1)
+#                source_embed_bos = mx.sym.BlockGrad(source_embed_bos)
+
+                # reconstruction encoder
+                # rec_encoded: (batch_size, max_seq_len, encoder_depth)
+                # rec_encoded: <2X> y1 y2 ... yn <EOS>
+                # rec_encoded_length = max_seq_len
+                (rec_encoded,
+                 rec_encoded_length,
+                 rec_encoded_seq_len) = self.encoder.encode(sampling_decoded,
+                                                            sampling_decoded_length,
+                                                            sampling_decoded_seq_len)
+
+                # reconstruction decoder
+                self.decoder.set_teacher_forcing_probability(1.0)
+                self.decoder.decode_sequence_as_instantiated_hidden = False
+                self.decoder.block_grad_prev_prediction = False
+                # rec_decoded: (batch_size, max_seq_len, decoder_depth)
+                # rec_decoded: <2Y> x1 x2 ... xn <EOS>
+                (rec_decoded, _, _) = self.decoder.decode_sequence(rec_encoded,
+                                                                   rec_encoded_length,
+                                                                   rec_encoded_seq_len,
+                                                                   source_embed_bos,
+                                                                   source_embed_length,
+                                                                   source_embed_seq_len)
+
+                # rec_decoded: (batch_size * max_seq_len, decoder_depth)
+                rec_decoded = mx.sym.reshape(data=rec_decoded, shape=(-3, 0))
+
+                # reconstruction output layer
+                # rec_logits: (batch_size * max_seq_len, source_vocab_size)
+                rec_logits = self.output_layer(rec_decoded)
+
+                reconstruction_loss_output = self.model_loss.get_loss(rec_logits,
+                                                                      labels=reconstruction_labels,
+                                                                      grad_scale=self.objective_weight[C.RECONSTRUCTION],
+                                                                      prefix=C.RECONSTRUCTION_PREFIX)
+
+                loss_output += reconstruction_loss_output
+
+            if C.REFINEMENT in self.sampling_objectives:
+                # sampling_source_1: <2Y>
+                sampling_source_1 = source_embed.slice_axis(axis=1, begin=0, end=1)
+                # sampling_source_2: y1(x1) y2(x2) ... yn(xn) <EOS>
+                sampling_source_2 = sampling_decoded.slice_axis(axis=1, begin=1, end=None)
+                # sampling_source: <2Y> y1(x1) y2(x2) ... yn(xn) <EOS>
+                sampling_source = mx.sym.concat(sampling_source_1, sampling_source_2, dim=1)
+
+                # refinement encoder
+                # ref_encoded: (batch_size, max_seq_len, encoder_depth)
+                # ref_encoded: <2Y> x1 x2 ... xn <EOS>
+                # ref_encoded_length = max_seq_len
+                (ref_encoded,
+                 ref_encoded_length,
+                 ref_encoded_seq_len) = self.encoder.encode(sampling_source,
+                                                            sampling_decoded_length,
+                                                            sampling_decoded_seq_len)
+
+                # refinement decoder
+                self.decoder.set_teacher_forcing_probability(1.0)
+                self.decoder.decode_sequence_as_instantiated_hidden = False
+                self.decoder.block_grad_prev_prediction = False
+                # ref_decoded: (batch_size, max_seq_len, decoder_depth)
+                # ref_decoded: <2Y> x1 x2 ... xn <EOS>
+                (ref_decoded, _, _) = self.decoder.decode_sequence(ref_encoded,
+                                                                   ref_encoded_length,
+                                                                   ref_encoded_seq_len,
+                                                                   target_embed,
+                                                                   target_embed_length,
+                                                                   target_embed_seq_len)
+
+                # ref_decoded: (batch_size * max_seq_len, decoder_depth)
+                ref_decoded = mx.sym.reshape(data=ref_decoded, shape=(-3, 0))
+
+                # refinement output layer
+                # ref_logits: (batch_size * max_seq_len, target_vocab_size)
+                ref_logits = self.output_layer(ref_decoded)
+
+                refinement_loss_output = self.model_loss.get_loss(ref_logits,
+                                                                  labels=labels,
+                                                                  grad_scale=self.objective_weight[C.REFINEMENT],
+                                                                  prefix=C.REFINEMENT_PREFIX)
+
+                loss_output += refinement_loss_output
+
+            return mx.sym.Group(loss_output), data_names, label_names
+
+        if self.sampling_objectives is not None:
+            sym_gen = sym_gen_sampling
+        else:
+            sym_gen = sym_gen_standard
 
         if self.config.lhuc:
             arguments = sym_gen(default_bucket_key)[0].list_arguments()
@@ -187,7 +425,17 @@ class TrainingModel(model.SockeyeModel):
         Runs forward/backward pass and updates training metric(s).
         """
         self.module.forward_backward(batch)
-        self.module.update_metric(metric, batch.label)
+        if C.RECONSTRUCTION in self.sampling_objectives:
+            source_words = batch.data[0].slice_axis(axis=2, begin=0, end=1).squeeze()
+            self.module.update_metric(metric, [source_words])
+        elif C.REFINEMENT in self.sampling_objectives:
+            self.module.update_metric(metric, batch.label)
+        elif C.HIGHLIGHT in self.sampling_objectives:
+            highlight_words = batch.data[0].slice_axis(axis=2, begin=self.config.config_embed_source.num_factors,
+                                                       end=None).squeeze()
+            self.module.update_metric(metric, [highlight_words])
+        else:
+            self.module.update_metric(metric, batch.label)
 
     def update(self):
         """
@@ -291,17 +539,20 @@ class TrainingModel(model.SockeyeModel):
         """
         self.current_module.load_optimizer_states(fname)
 
-    def initialize_parameters(self, initializer: mx.init.Initializer, allow_missing_params: bool):
+    def initialize_parameters(self, initializer: mx.init.Initializer,
+                              allow_missing_params: bool, allow_extra_params :bool):
         """
         Initializes the parameters of the underlying module.
 
         :param initializer: Parameter initializer.
         :param allow_missing_params: Whether to allow missing parameters.
+        :param allow_extra_params: Whether to allow extra parameters.
         """
         self.module.init_params(initializer=initializer,
                                 arg_params=self.params,
                                 aux_params=self.aux_params,
                                 allow_missing=allow_missing_params,
+                                allow_extra=allow_extra_params,
                                 force_init=False)
 
     def log_parameters(self):
@@ -332,17 +583,19 @@ class TrainingModel(model.SockeyeModel):
         self.aux_params = aux_params
         super().save_params_to_file(fname)
 
-    def load_params_from_file(self, fname: str, allow_missing_params: bool = False):
+    def load_params_from_file(self, fname: str, allow_missing_params: bool = False, allow_extra_params: bool = False):
         """
         Loads parameters from a file and sets the parameters of the underlying module and this model instance.
 
         :param fname: File name to load parameters from.
         :param allow_missing_params: If set, the given parameters are allowed to be a subset of the Module parameters.
+        :param allow_extra_params: If set, the given parameters are allowed to be a superset of the Module parameters.
         """
         super().load_params_from_file(fname)  # sets self.params & self.aux_params
         self.module.set_params(arg_params=self.params,
                                aux_params=self.aux_params,
-                               allow_missing=allow_missing_params)
+                               allow_missing=allow_missing_params,
+                               allow_extra=allow_extra_params)
 
     def install_monitor(self, monitor_pattern: str, monitor_stat_func_name: str):
         """
@@ -363,6 +616,18 @@ class TrainingModel(model.SockeyeModel):
     def monitor(self) -> Optional[mx.monitor.Monitor]:
         return self._monitor
 
+    def metric_output_names(self, is_train: bool = True) -> List[str]:
+        """
+        Returns the names of model outputs for metrics
+        """
+        if C.RECONSTRUCTION in self.sampling_objectives and is_train:
+            return [C.RECONSTRUCTION_SOFTMAX_OUTPUT_NAME]
+        elif C.REFINEMENT in self.sampling_objectives and is_train:
+            return [C.REFINEMENT_SOFTMAX_OUTPUT_NAME]
+        elif C.HIGHLIGHT in self.sampling_objectives and is_train:
+            return [C.HIGHLIGHT_SOFTMAX_OUTPUT_NAME]
+        else:
+            return [C.SOFTMAX_OUTPUT_NAME]
 
 def global_norm(ndarrays: List[mx.nd.NDArray]) -> float:
     # accumulate in a list, as asscalar is blocking and this way we can run the norm calculation in parallel.
@@ -455,6 +720,7 @@ class EarlyStoppingTrainer:
             mxmonitor_pattern: Optional[str] = None,
             mxmonitor_stat_func: Optional[str] = None,
             allow_missing_parameters: bool = False,
+            allow_extra_parameters: bool = False,
             existing_parameters: Optional[str] = None):
         """
         Fits model to data given by train_iter using early-stopping w.r.t data given by val_iter.
@@ -486,6 +752,7 @@ class EarlyStoppingTrainer:
                when using MXNEt's monitor.
 
         :param allow_missing_parameters: Allow missing parameters when initializing model parameters from file.
+        :param allow_extra_parameters: Allow extra parameters when initializing model parameters from file.
         :param existing_parameters: Optional filename of existing/pre-trained parameters to initialize from.
 
         :return: Best score on validation data observed during training.
@@ -493,7 +760,7 @@ class EarlyStoppingTrainer:
         self._check_args(metrics, early_stopping_metric, lr_decay_opt_states_reset, lr_decay_param_reset, decoder)
         logger.info("Early stopping by optimizing '%s'", early_stopping_metric)
 
-        self._initialize_parameters(existing_parameters, allow_missing_parameters)
+        self._initialize_parameters(existing_parameters, allow_missing_parameters, allow_extra_parameters)
         self._initialize_optimizer()
 
         resume_training = os.path.exists(self.training_state_dirname)
@@ -769,11 +1036,13 @@ class EarlyStoppingTrainer:
             if os.path.exists(best_opt_states_fname):
                 os.remove(best_opt_states_fname)
 
-    def _initialize_parameters(self, params: Optional[str], allow_missing_params: bool):
-        self.model.initialize_parameters(self.optimizer_config.initializer, allow_missing_params)
+    def _initialize_parameters(self, params: Optional[str], allow_missing_params: bool, allow_extra_params: bool):
+        self.model.initialize_parameters(self.optimizer_config.initializer, allow_missing_params, allow_extra_params)
         if params is not None:
             logger.info("Training will start with parameters loaded from '%s'", params)
-            self.model.load_params_from_file(params, allow_missing_params=allow_missing_params)
+            self.model.load_params_from_file(params,
+                                             allow_missing_params=allow_missing_params,
+                                             allow_extra_params=allow_extra_params)
         self.model.log_parameters()
 
     def _initialize_optimizer(self):
@@ -818,38 +1087,40 @@ class EarlyStoppingTrainer:
         return os.path.join(self.model.output_dir, C.TRAINING_STATE_DIRNAME)
 
     @staticmethod
-    def _create_eval_metric(metric_name: str) -> mx.metric.EvalMetric:
+    def _create_eval_metric(metric_name: str, output_names: List[str]) -> mx.metric.EvalMetric:
         """
         Creates an EvalMetric given a metric names.
         """
         # output_names refers to the list of outputs this metric should use to update itself, e.g. the softmax output
         if metric_name == C.ACCURACY:
-            return utils.Accuracy(ignore_label=C.PAD_ID, output_names=[C.SOFTMAX_OUTPUT_NAME])
+            return utils.Accuracy(ignore_label=C.PAD_ID, output_names=output_names)
         elif metric_name == C.PERPLEXITY:
-            return mx.metric.Perplexity(ignore_label=C.PAD_ID, output_names=[C.SOFTMAX_OUTPUT_NAME])
+            return mx.metric.Perplexity(ignore_label=C.PAD_ID, output_names=output_names)
         else:
             raise ValueError("unknown metric name")
 
     @staticmethod
-    def _create_eval_metric_composite(metric_names: List[str]) -> mx.metric.CompositeEvalMetric:
+    def _create_eval_metric_composite(metric_names: List[str],
+                                      output_names: List[str]) -> mx.metric.CompositeEvalMetric:
         """
         Creates a composite EvalMetric given a list of metric names.
         """
-        metrics = [EarlyStoppingTrainer._create_eval_metric(metric_name) for metric_name in metric_names]
+        metrics = [EarlyStoppingTrainer._create_eval_metric(metric_name, output_names) for metric_name in metric_names]
         return mx.metric.create(metrics)
 
     def _create_metrics(self, metrics: List[str], optimizer: mx.optimizer.Optimizer,
                         loss: loss.Loss) -> Tuple[mx.metric.EvalMetric,
                                                   mx.metric.EvalMetric,
                                                   Optional[mx.metric.EvalMetric]]:
-        metric_train = self._create_eval_metric_composite(metrics)
-        metric_val = self._create_eval_metric_composite(metrics)
+        metric_train = self._create_eval_metric_composite(metrics, self.model.metric_output_names(is_train=True))
+        metric_val = self._create_eval_metric_composite(metrics, self.model.metric_output_names(is_train=False))
         # If optimizer requires it, track loss as metric
         if isinstance(optimizer, SockeyeOptimizer):
             if optimizer.request_optimized_metric:
-                metric_loss = self._create_eval_metric(self.state.early_stopping_metric)
+                metric_loss = self._create_eval_metric(self.state.early_stopping_metric,
+                                                       self.model.metric_output_names(is_train=True))
             else:
-                metric_loss = loss.create_metric()
+                metric_loss = loss.create_metric(self.model.metric_output_names(is_train=True))
         else:
             metric_loss = None
         return metric_train, metric_val, metric_loss

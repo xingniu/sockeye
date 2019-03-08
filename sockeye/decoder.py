@@ -89,6 +89,12 @@ class Decoder(ABC):
     def __init__(self, dtype):
         logger.info('{}.{} dtype: {}'.format(self.__module__, self.__class__.__name__, dtype))
         self.dtype = dtype
+        self.teacher_forcing_probability = 1.0
+        self.instantiate_hidden = None
+        self.decode_sequence_as_instantiated_hidden = False
+        self.softmax_temperature = 1.0
+        self.gumbel_noise_scale = 1.0
+        self.block_grad_prev_prediction = False
 
     @abstractmethod
     def decode_sequence(self,
@@ -97,7 +103,7 @@ class Decoder(ABC):
                         source_encoded_max_length: int,
                         target_embed: mx.sym.Symbol,
                         target_embed_lengths: mx.sym.Symbol,
-                        target_embed_max_length: int) -> mx.sym.Symbol:
+                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int]:
         """
         Decodes a sequence of embedded target words and returns sequence of last decoder
         representations for each time step.
@@ -196,6 +202,30 @@ class Decoder(ABC):
         """
         return None
 
+    def set_teacher_forcing_probability(self, teacher_forcing_probability):
+        """
+        Sets the teacher forcing probability.
+        When training the sequence prediction model,
+        only the ground truth is used if teacher_forcing_probability == 1.0,
+        only the actual output is used if teacher_forcing_probability == 0.0,
+        otherwise the ground truth is used with teacher_forcing_probability.
+        """
+        self.teacher_forcing_probability = teacher_forcing_probability
+
+    def set_instantiate_hidden(self,
+                               instantiate_hidden: str,
+                               output_layer: layers.OutputLayer,
+                               embedding_target: encoder.Embedding,
+                               softmax_temperature: float = 1.0,
+                               gumbel_noise_scale: float = 1.0):
+        """
+        Sets the instantiating method when instantiating hidden states is needed.
+        """
+        self.instantiate_hidden = instantiate_hidden
+        self.output_layer = output_layer
+        self.embedding_target = embedding_target
+        self.softmax_temperature = softmax_temperature
+        self.gumbel_noise_scale = gumbel_noise_scale
 
 @Decoder.register(transformer.TransformerConfig, C.TRANSFORMER_DECODER_PREFIX)
 class TransformerDecoder(Decoder):
@@ -236,7 +266,7 @@ class TransformerDecoder(Decoder):
                         source_encoded_max_length: int,
                         target_embed: mx.sym.Symbol,
                         target_embed_lengths: mx.sym.Symbol,
-                        target_embed_max_length: int) -> mx.sym.Symbol:
+                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int]:
         """
         Decodes a sequence of embedded target words and returns sequence of last decoder
         representations for each time step.
@@ -275,7 +305,10 @@ class TransformerDecoder(Decoder):
                            source_bias=source_bias)
         target = self.final_process(data=target, prev=None)
 
-        return target
+        # lengths: (batch_size,)
+        lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
+
+        return target, lengths, target_embed_max_length
 
     def decode_step(self,
                     step: int,
@@ -566,7 +599,7 @@ class RecurrentDecoder(Decoder):
                         source_encoded_max_length: int,
                         target_embed: mx.sym.Symbol,
                         target_embed_lengths: mx.sym.Symbol,
-                        target_embed_max_length: int) -> mx.sym.Symbol:
+                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int]:
         """
         Decodes a sequence of embedded target words and returns sequence of last decoder
         representations for each time step.
@@ -577,7 +610,7 @@ class RecurrentDecoder(Decoder):
         :param target_embed: Embedded target sequence. Shape: (batch_size, target_embed_max_length, target_num_embed).
         :param target_embed_lengths: Lengths of embedded target sequences. Shape: (batch_size,).
         :param target_embed_max_length: Dimension of the embedded target sequence.
-        :return: Decoder data. Shape: (batch_size, target_embed_max_length, decoder_depth).
+        :return: Decoder data. Shape: (batch_size, target_embed_max_length, decoder_depth/num_target_embed).
         """
 
         # target_embed: target_seq_len * (batch_size, num_target_embed)
@@ -601,22 +634,86 @@ class RecurrentDecoder(Decoder):
         # layer_states: List[(batch_size, state_num_hidden]
         state = self.get_initial_state(source_encoded, source_encoded_lengths)
 
+        # initialize word_vec_prev_prediction to <BOS>: (batch_size, num_target_embed)
+        word_vec_prev_prediction = target_embed[0]
         # hidden_all: target_embed_max_length * (batch_size, rnn_num_hidden)
         hidden_states = []  # type: List[mx.sym.Symbol]
+        word_predictions = []  # type: List[mx.sym.Symbol]
         # TODO: possible alternative: feed back the context vector instead of the hidden (see lamtram)
         self.reset()
         for seq_idx in range(target_embed_max_length):
-            # hidden: (batch_size, rnn_num_hidden)
-            state, attention_state = self._step(target_embed[seq_idx],
+            if self.block_grad_prev_prediction:
+                word_vec_prev_prediction = mx.sym.BlockGrad(word_vec_prev_prediction)
+            # word_vec_prev: (batch_size, num_target_embed)
+            if self.teacher_forcing_probability == 1.0:
+                word_vec_prev = target_embed[seq_idx]
+            elif self.teacher_forcing_probability == 0.0:
+                word_vec_prev = word_vec_prev_prediction
+
+            state, attention_state = self._step(word_vec_prev,
                                                 state,
                                                 attention_func,
                                                 attention_state,
                                                 seq_idx,
                                                 enc_last_hidden=enc_last_hidden)
-            hidden_states.append(state.hidden)
 
-        # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
-        return mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
+            # get the next word_vec_prev_prediction: (batch_size, num_target_embed)
+            if self.teacher_forcing_probability < 1.0:
+                # logits: (batch_size, vocab_size)
+                logits = self.output_layer(state.hidden)
+                if self.instantiate_hidden == C.ARGMAX_NAME:
+                    # word_prev_prediction: (batch_size, 1)
+                    word_prev_prediction = mx.sym.argmax(logits, axis=1, keepdims=True)
+                    # word_vec_prev_prediction: (batch_size, 1, num_target_embed)
+                    word_vec_prev_prediction, _, _ = self.embedding_target.encode(data=word_prev_prediction,
+                                                                                  data_length=None,
+                                                                                  seq_len=1)
+                    # word_vec_prev_prediction: (batch_size, num_target_embed)
+                    word_vec_prev_prediction = mx.sym.squeeze(word_vec_prev_prediction, axis=1)
+                elif self.instantiate_hidden == C.SOFTMAX_SAMPLE_NAME:
+                    if self.softmax_temperature != 1.0:
+                        logits = logits / self.softmax_temperature
+                    # word_prev_dist: (batch_size, vocab_size)
+                    word_prev_dist = mx.sym.softmax(logits, axis=1)
+                    # word_prev_prediction: (batch_size, 1)
+                    word_prev_prediction = mx.sym.sample_multinomial(word_prev_dist, shape=1)
+                    # word_vec_prev_prediction: (batch_size, 1, num_target_embed)
+                    word_vec_prev_prediction, _, _ = self.embedding_target.encode(data=word_prev_prediction,
+                                                                                  data_length=None,
+                                                                                  seq_len=1)
+                    # word_vec_prev_prediction: (batch_size, num_target_embed)
+                    word_vec_prev_prediction = mx.sym.squeeze(word_vec_prev_prediction, axis=1)
+                elif self.instantiate_hidden in {C.GUMBEL_SOFTMAX_NAME, C.ST_GUMBEL_SOFTMAX_NAME}:
+                    # word_prev_dist: (batch_size, vocab_size)
+                    word_prev_dist = utils.gumbel_softmax(logits,
+                                                          temperature=self.softmax_temperature,
+                                                          noise_scale=self.gumbel_noise_scale,
+                                                          st=self.instantiate_hidden==C.ST_GUMBEL_SOFTMAX_NAME,
+                                                          axis=1)
+                    # word_prev_prediction: (batch_size, 1)
+                    word_prev_prediction = mx.sym.argmax(word_prev_dist, axis=1, keepdims=True)
+                    # word_vec_prev_prediction: (batch_size, num_target_embed)
+                    word_vec_prev_prediction = mx.sym.dot(word_prev_dist, self.embedding_target.embed_weight)
+                word_predictions.append(word_prev_prediction)
+            if self.decode_sequence_as_instantiated_hidden:
+                hidden_states.append(word_vec_prev_prediction)
+            else:
+                hidden_states.append(state.hidden)
+
+        # lengths: (batch_size,)
+        if self.teacher_forcing_probability == 1.0:
+            lengths = target_embed_lengths
+        elif self.instantiate_hidden in {C.GUMBEL_SOFTMAX_NAME}:
+            lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
+        else:
+#            # concatenate along time axis: (batch_size, target_embed_max_length)
+#            target_predictions = mx.sym.concat(*word_predictions, dim=1)
+#            lengths = utils.compute_lengths(target_predictions)
+            lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
+        # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden/num_target_embed)
+        target_hidden = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
+
+        return target_hidden, lengths, target_embed_max_length
 
     def decode_step(self,
                     step: int,
@@ -1031,7 +1128,7 @@ class ConvolutionalDecoder(Decoder):
                         source_encoded_max_length: int,
                         target_embed: mx.sym.Symbol,
                         target_embed_lengths: mx.sym.Symbol,
-                        target_embed_max_length: int) -> mx.sym.Symbol:
+                        target_embed_max_length: int) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, int]:
         """
         Decodes a sequence of embedded target words and returns sequence of last decoder
         representations for each time step.
@@ -1052,7 +1149,10 @@ class ConvolutionalDecoder(Decoder):
                                      target_embed_lengths=target_embed_lengths,
                                      target_embed_max_length=target_embed_max_length)
 
-        return target_hidden
+        # lengths: (batch_size,)
+        lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
+
+        return target_hidden, lengths, target_embed_max_length
 
     def _decode(self,
                 source_encoded: mx.sym.Symbol,

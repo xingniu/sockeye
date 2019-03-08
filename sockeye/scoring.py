@@ -138,8 +138,12 @@ class ScoringModel(model.SockeyeModel):
 
             # decoder
             # target_decoded: (batch-size, target_len, decoder_depth)
-            target_decoded = self.decoder.decode_sequence(source_encoded, source_encoded_length, source_encoded_seq_len,
-                                                          target_embed, target_embed_length, target_embed_seq_len)
+            (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded,
+                                                                  source_encoded_length,
+                                                                  source_encoded_seq_len,
+                                                                  target_embed,
+                                                                  target_embed_length,
+                                                                  target_embed_seq_len)
 
             # output layer
             # logits: (batch_size * target_seq_len, target_vocab_size)

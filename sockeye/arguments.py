@@ -529,6 +529,11 @@ def add_model_parameters(params):
                               default=False,
                               help="Allow missing parameters when initializing model parameters from file. "
                                    "Default: %(default)s.")
+    model_params.add_argument('--allow-extra-params',
+                              action="store_true",
+                              default=False,
+                              help="Allow extra parameters when initializing model parameters from file. "
+                                   "Default: %(default)s.")
 
     model_params.add_argument('--encoder',
                               choices=C.ENCODERS,
@@ -758,6 +763,23 @@ def add_model_parameters(params):
     model_params.add_argument('--weight-normalization', action="store_true",
                               help="Adds weight normalization to decoder output layers "
                                    "(and all convolutional weight matrices for CNN decoders). Default: %(default)s.")
+
+    # sampling in decoders
+    model_params.add_argument('--instantiate-hidden',
+                              type=str,
+                              default=None,
+                              choices=C.INSTANTIATING_HIDDEN_CHOICES,
+                              help='Use instantiated hidden states as previous target embeddings. '
+                                   'This is currently for RNN models only. Default: %(default)s.')
+    model_params.add_argument('--softmax-temperature',
+                              type=float,
+                              default=1.0,
+                              help='Controls peakiness of model predictions. Values < 1.0 produce '
+                                   'peaked predictions, values > 1.0 produce smoothed distributions.')
+    model_params.add_argument('--gumbel-noise-scale',
+                              type=float,
+                              default=1.0,
+                              help='Gumbel noise scale.')
 
 
 def add_batch_args(params, default_batch_size=4096):
@@ -1064,6 +1086,22 @@ def add_training_args(params):
                               help="Do not perform any actual training, but print statistics about the model"
                               " and mode of operation.")
 
+    train_params.add_argument('--sampling-objectives',
+                              type=str,
+                              nargs='+',
+                              default=None,
+                              choices=C.SAMPLING_OBJECTIVES,
+                              help='Train or fine-tune bidirectional NMT models with sampling objectives. '
+                                   'This is currently for RNN models only. Default: %(default)s.')
+    train_params.add_argument('--sampling-loss-weights',
+                              type=float,
+                              nargs='+',
+                              default=[0.5],
+                              help='The weights for sampling losses. Default: %(default)s.')
+    train_params.add_argument('--decoder-block-grad-prev-prediction', action="store_true",
+                              help="Blocks gradient computation for the previous prediction in the decoder. "
+                                   "Default: %(default)s.")
+
 
 def add_train_cli_args(params):
     add_training_io_args(params)
@@ -1282,6 +1320,11 @@ def add_inference_args(params):
                                type=str,
                                help='EXPERIMENTAL: may be changed or removed in future. Overrides training dtype of '
                                     'encoders and decoders during inference. Default: %(default)s')
+
+    decode_params.add_argument('--analysis-mode',
+                               action='store_true',
+                               default=False,
+                               help="Save hiddens states. Default: %(default)s")
 
 
 def add_evaluate_args(params):

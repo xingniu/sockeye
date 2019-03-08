@@ -430,10 +430,12 @@ class RawParallelDatasetLoader:
                  buckets: List[Tuple[int, int]],
                  eos_id: int,
                  pad_id: int,
+                 highlight_diff: bool = False,
                  dtype: str = 'float32') -> None:
         self.buckets = buckets
         self.eos_id = eos_id
         self.pad_id = pad_id
+        self.highlight_diff = highlight_diff
         self.dtype = dtype
 
     def load(self,
@@ -443,6 +445,8 @@ class RawParallelDatasetLoader:
 
         assert len(num_samples_per_bucket) == len(self.buckets)
         num_factors = len(source_iterables)
+        if self.highlight_diff:
+            num_factors += 1
 
         data_source = [np.full((num_samples, source_len, num_factors), self.pad_id, dtype=self.dtype)
                        for (source_len, target_len), num_samples in zip(self.buckets, num_samples_per_bucket)]
@@ -481,6 +485,10 @@ class RawParallelDatasetLoader:
             # Once MXNet allows item assignments given a list of indices (probably MXNet 1.0): e.g a[[0,1,5,2]] = x,
             # we can try again to compute the label sequence on the fly in next().
             data_label[buck_index][sample_index, :target_len] = target[1:] + [self.eos_id]
+            if self.highlight_diff:
+                masked_target = [idx if idx not in set(sources[0]) else self.pad_id for idx in target[1:]]
+                # <EOS> should be highlighted to encourage proper stop.
+                data_source[buck_index][sample_index, :target_len, -1] = masked_target + [self.eos_id]
 
             bucket_sample_index[buck_index] += 1
 
@@ -767,6 +775,7 @@ def get_training_data_iters(sources: List[str],
                             batch_by_words: bool,
                             batch_num_devices: int,
                             fill_up: str,
+                            highlight_diff: bool,
                             max_seq_len_source: int,
                             max_seq_len_target: int,
                             bucketing: bool,
@@ -790,6 +799,7 @@ def get_training_data_iters(sources: List[str],
     :param batch_by_words: Size batches by words rather than sentences.
     :param batch_num_devices: Number of devices batches will be parallelized across.
     :param fill_up: Fill-up policy for buckets.
+    :param highlight_diff: Whether to mask non-diff tokens in the label.
     :param max_seq_len_source: Maximum source sequence length.
     :param max_seq_len_target: Maximum target sequence length.
     :param bucketing: Whether to use bucketing.
@@ -825,7 +835,8 @@ def get_training_data_iters(sources: List[str],
     # Pass 3: Load the data into memory and return the iterator.
     data_loader = RawParallelDatasetLoader(buckets=buckets,
                                            eos_id=target_vocab[C.EOS_SYMBOL],
-                                           pad_id=C.PAD_ID)
+                                           pad_id=C.PAD_ID,
+                                           highlight_diff=highlight_diff)
 
     training_data = data_loader.load(sources_sentences, target_sentences,
                                      data_statistics.num_sents_per_bucket).fill_up(bucket_batch_sizes, fill_up)
@@ -848,6 +859,7 @@ def get_training_data_iters(sources: List[str],
                                     batch_size=batch_size,
                                     bucket_batch_sizes=bucket_batch_sizes,
                                     num_factors=len(sources),
+                                    highlight_diff=highlight_diff,
                                     permute=permute)
 
     validation_iter = None
@@ -1407,6 +1419,7 @@ class BaseParallelSampleIter(mx.io.DataIter):
     :param target_data_name: The target data name.
     :param label_name: The label name.
     :param num_factors: The number of source factors.
+    :param highlight_diff: Whether to mask non-diff tokens in the label.
     :param permute: Randomly shuffle the parallel data.
     :param dtype: The MXNet data type.
     """
@@ -1420,6 +1433,7 @@ class BaseParallelSampleIter(mx.io.DataIter):
                  target_data_name: str,
                  label_name: str,
                  num_factors: int = 1,
+                 highlight_diff: bool = False,
                  permute: bool = True,
                  dtype='float32') -> None:
         super().__init__(batch_size=batch_size)
@@ -1431,6 +1445,7 @@ class BaseParallelSampleIter(mx.io.DataIter):
         self.target_data_name = target_data_name
         self.label_name = label_name
         self.num_factors = num_factors
+        self.total_num_factors = self.num_factors + 1 if highlight_diff else self.num_factors
         self.permute = permute
         self.dtype = dtype
 
@@ -1444,7 +1459,7 @@ class BaseParallelSampleIter(mx.io.DataIter):
         self.provide_data = [
             mx.io.DataDesc(name=self.source_data_name,
                            shape=(self.bucket_batch_sizes[-1].batch_size, self.default_bucket_key[0],
-                                  self.num_factors),
+                                  self.total_num_factors),
                            layout=C.BATCH_MAJOR),
             mx.io.DataDesc(name=self.target_data_name,
                            shape=(self.bucket_batch_sizes[-1].batch_size, self.default_bucket_key[1]),
@@ -1494,11 +1509,13 @@ class ShardedParallelSampleIter(BaseParallelSampleIter):
                  target_data_name=C.TARGET_NAME,
                  label_name=C.TARGET_LABEL_NAME,
                  num_factors: int = 1,
+                 highlight_diff: bool = False,
                  permute: bool = True,
                  dtype='float32') -> None:
         super().__init__(buckets=buckets, batch_size=batch_size, bucket_batch_sizes=bucket_batch_sizes,
                          source_data_name=source_data_name, target_data_name=target_data_name,
-                         label_name=label_name, num_factors=num_factors, permute=permute, dtype=dtype)
+                         label_name=label_name, num_factors=num_factors, highlight_diff=highlight_diff,
+                         permute=permute, dtype=dtype)
         assert len(shards_fnames) > 0
         self.shards_fnames = list(shards_fnames)
         self.shard_index = -1
@@ -1519,6 +1536,7 @@ class ShardedParallelSampleIter(BaseParallelSampleIter):
                                              source_data_name=self.source_data_name,
                                              target_data_name=self.target_data_name,
                                              num_factors=self.num_factors,
+                                             highlight_diff=self.highlight_diff,
                                              permute=self.permute)
 
     def reset(self):
@@ -1587,11 +1605,13 @@ class ParallelSampleIter(BaseParallelSampleIter):
                  target_data_name=C.TARGET_NAME,
                  label_name=C.TARGET_LABEL_NAME,
                  num_factors: int = 1,
+                 highlight_diff: bool = False,
                  permute: bool = True,
                  dtype='float32') -> None:
         super().__init__(buckets=buckets, batch_size=batch_size, bucket_batch_sizes=bucket_batch_sizes,
                          source_data_name=source_data_name, target_data_name=target_data_name,
-                         label_name=label_name, num_factors=num_factors, permute=permute, dtype=dtype)
+                         label_name=label_name, num_factors=num_factors, highlight_diff=highlight_diff,
+                         permute=permute, dtype=dtype)
 
         # create independent lists to be shuffled
         self.data = ParallelDataSet(list(data.source), list(data.target), list(data.label))

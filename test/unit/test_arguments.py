@@ -78,6 +78,7 @@ def test_device_args(test_params, expected_params):
 @pytest.mark.parametrize("test_params, expected_params", [
     ('', dict(params=None,
               allow_missing_params=False,
+              allow_extra_params=False,
               num_layers=(6, 6),
               num_embed=(512, 512),
               source_factors_num_embed=[],
@@ -111,6 +112,9 @@ def test_device_args(test_params, expected_params):
               cnn_project_qkv=False,
               layer_normalization=False,
               weight_normalization=False,
+              instantiate_hidden=None,
+              softmax_temperature=1.0,
+              gumbel_noise_scale=1.0,
               lhuc=None,
               encoder=C.TRANSFORMER_TYPE,
               conv_embed_max_filter_width=8,
@@ -128,6 +132,9 @@ def test_model_parameters(test_params, expected_params):
 
 @pytest.mark.parametrize("test_params, expected_params", [
     ('', dict(decoder_only=False,
+              sampling_objectives=None,
+              sampling_loss_weight=0.5,
+              decoder_block_grad_prev_prediction=False,
               batch_size=4096,
               batch_type="word",
               fill_up='replicate',

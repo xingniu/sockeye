@@ -1149,6 +1149,29 @@ class Translator:
         # pylint: disable=invalid-unary-operand-type
         return -log_probs.log_softmax()
 
+    def analyze(self, trans_inputs: List[TranslatorInput]) -> List[TranslatorOutput]:
+        """
+        Batch-translates a list of TranslatorInputs, returns a list of TranslatorOutputs.
+        Splits oversized sentences to sentence chunks of size less than max_input_length.
+
+        :param trans_inputs: List of TranslatorInputs as returned by make_input().
+        :return: List of translation results.
+        """
+        for trans_input in trans_inputs:
+            trans_input = trans_input.with_eos()
+            if len(trans_input.tokens) > self.max_input_length:
+                logger.info("Input %s has length (%d) that exceeds max input length (%d). ",
+                             trans_input.sentence_id, len(trans_input.tokens), self.max_input_length)
+            else:
+                logger.info("%d - %s", trans_input.sentence_id, trans_input.tokens)
+                source_length = data_io.get_bucket(len(trans_input.tokens), self.buckets_source)
+                source = mx.nd.zeros((1, source_length, self.num_source_factors), ctx=self.context)
+                source[0, :len(trans_input), 0] = data_io.tokens2ids(trans_input.tokens, self.source_vocabs[0])
+                for encoder_states in self._encode(source, source_length):
+                    # source_encoded
+                    print(encoder_states.states[0])
+        return None
+
     def translate(self, trans_inputs: List[TranslatorInput]) -> List[TranslatorOutput]:
         """
         Batch-translates a list of TranslatorInputs, returns a list of TranslatorOutputs.
