@@ -73,6 +73,7 @@ class TrainingModel(model.SockeyeModel):
                  fixed_param_names: Optional[List[str]] = None,
                  sampling_objectives: Optional[List[str]] = None,
                  sampling_loss_weights: Optional[List[float]] = [0.5],
+                 sampling_soft_alignment: bool = False,
                  instantiate_hidden: str = None,
                  decoder_block_grad_prev_prediction: bool = False) -> None:
         super().__init__(config)
@@ -81,6 +82,7 @@ class TrainingModel(model.SockeyeModel):
         self.fixed_param_names = fixed_param_names
         self.sampling_objectives = sampling_objectives
         self.sampling_loss_weights = sampling_loss_weights
+        self.sampling_soft_alignment = sampling_soft_alignment
         self.instantiate_hidden = instantiate_hidden
         self.decoder_block_grad_prev_prediction = decoder_block_grad_prev_prediction
         self._bucketing = bucketing
@@ -109,7 +111,7 @@ class TrainingModel(model.SockeyeModel):
         # source_words: (batch_size, seq_length)
         source_words = source.slice_axis(axis=2, begin=0, end=1).squeeze()
         source_length = utils.compute_lengths(source_words)
-        # source: (batch_size, seq_length)
+        # target: (batch_size, seq_length)
         target = mx.sym.Variable(C.TARGET_NAME)
         target_length = utils.compute_lengths(target)
         # raw_labels: (batch_size, seq_length)
@@ -142,6 +144,9 @@ class TrainingModel(model.SockeyeModel):
         print(self.objective_weight)
 
         self.model_loss = loss.get_loss(self.config.config_loss)
+        if self.sampling_soft_alignment:
+            self.sampling_loss = loss.get_loss(self.config.config_loss.copy(name=C.CUSTOM_CROSS_ENTROPY,
+                                                                            ignore_labels=[C.PAD_ID, C.UNK_ID, C.EOS_ID]))
 
         data_names = [C.SOURCE_NAME, C.TARGET_NAME]
         label_names = [C.TARGET_LABEL_NAME]
@@ -239,7 +244,7 @@ class TrainingModel(model.SockeyeModel):
             self.decoder.set_teacher_forcing_probability(1.0)
             self.decoder.decode_sequence_as_instantiated_hidden = False
             self.decoder.block_grad_prev_prediction = False
-            # target_decoded: (batch-size, max_seq_len, decoder_depth)
+            # target_decoded: (batch_size, max_seq_len, decoder_depth)
             # target_decoded: <2X> y1 y2 ... yn <EOS>
             (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded,
                                                                   source_encoded_length,
@@ -263,25 +268,59 @@ class TrainingModel(model.SockeyeModel):
             self.decoder.set_teacher_forcing_probability(0.0)
             self.decoder.decode_sequence_as_instantiated_hidden = self.instantiate_hidden is not None
             self.decoder.block_grad_prev_prediction = self.decoder_block_grad_prev_prediction
-            # sampling_decoded: (batch-size, max_seq_len, num_target_embed)
+            # sampling_decoded: (batch_size, max_seq_len, num_target_embed)
             # sampling_decoded: <2X> y1 y2 ... yn <EOS>
-            # sampling_decoded_length = max_seq_len
+            # sampling_decoded_length = actual sample lengths
             (sampling_decoded,
              sampling_decoded_length,
              sampling_decoded_seq_len) = self.decoder.decode_sequence(source_encoded,
                                                                       source_encoded_length,
                                                                       source_encoded_seq_len,
                                                                       target_embed,
-                                                                      source_encoded_length,
+                                                                      target_embed_length,
                                                                       target_embed_seq_len)
 
             loss_output = translation_loss_output
 
             if C.HIGHLIGHT in self.sampling_objectives:
-                highlight_loss_output = self.model_loss.get_loss(logits,
-                                                                 labels=highlight_labels,
-                                                                 grad_scale=self.objective_weight[C.HIGHLIGHT],
-                                                                 prefix=C.HIGHLIGHT_PREFIX)
+                if self.sampling_soft_alignment:
+                    # pad_mask: [0 0 0 0 0 0 0 0 1 1]
+                    # pad_mask: (batch_size, max_seq_len)
+                    pad_mask = mx.sym.zeros_like(target)
+                    pad_mask = mx.sym.SequenceMask(pad_mask, sequence_length=sampling_decoded_length,
+                                                   use_sequence_length=True, value=1, axis=1)
+                    # pad_mask: (batch_size * max_seq_len)
+                    pad_mask = mx.sym.broadcast_logical_and(pad_mask.reshape(shape=(-1)), labels == C.PAD_ID)
+
+                    # sampling_decoded: (batch_size * max_seq_len, decoder_depth)
+                    sampling_decoded_reshape = mx.sym.reshape(data=sampling_decoded, shape=(-3, 0))
+                    # output layer
+                    # sampling_logits: (batch_size * max_seq_len, target_vocab_size)
+                    sampling_logits = self.output_layer(sampling_decoded_reshape)
+                    sampling_logits = mx.sym.broadcast_mul(sampling_logits, mx.sym.expand_dims(mx.sym.logical_not(pad_mask), axis=1))
+                    sampling_logits = mx.sym.broadcast_add(sampling_logits, mx.sym.expand_dims(-pad_mask*1e9, axis=1))
+
+                    # vocab_prob: (batch_size, max_seq_len, target_vocab_size)
+                    vocab_prob = mx.sym.reshape(mx.sym.softmax(sampling_logits, axis=1), shape=(-4, -1, target_seq_len, 0))
+                    # pos_prob: (batch_size, max_seq_len, target_vocab_size)
+                    pos_prob = mx.sym.softmax(mx.sym.reshape(sampling_logits, shape=(-4, -1, target_seq_len, 0)), axis=1)
+                    # prob: (batch_size, max_seq_len, target_vocab_size)
+                    prob = vocab_prob * pos_prob
+                    # prob: (batch_size, target_vocab_size)
+                    prob = mx.sym.sum(prob, axis=1)
+                    # prob: (batch_size * max_seq_len, target_vocab_size)
+                    prob = mx.sym.repeat(prob, repeats=target_seq_len, axis=0)
+
+                    highlight_loss_output = self.sampling_loss.get_loss(prob,
+                                                                        labels=highlight_labels,
+                                                                        grad_scale=self.objective_weight[C.HIGHLIGHT],
+                                                                        prefix=C.HIGHLIGHT_PREFIX)
+                    highlight_loss_output += self.sampling_loss.get_outputs(prefix=C.HIGHLIGHT_PREFIX)
+                else:
+                    highlight_loss_output = self.model_loss.get_loss(logits,
+                                                                     labels=highlight_labels,
+                                                                     grad_scale=self.objective_weight[C.HIGHLIGHT],
+                                                                     prefix=C.HIGHLIGHT_PREFIX)
 
                 loss_output += highlight_loss_output
 
@@ -297,7 +336,7 @@ class TrainingModel(model.SockeyeModel):
                 # reconstruction encoder
                 # rec_encoded: (batch_size, max_seq_len, encoder_depth)
                 # rec_encoded: <2X> y1 y2 ... yn <EOS>
-                # rec_encoded_length = max_seq_len
+                # rec_encoded_length = actual sample lengths
                 (rec_encoded,
                  rec_encoded_length,
                  rec_encoded_seq_len) = self.encoder.encode(sampling_decoded,
@@ -342,7 +381,7 @@ class TrainingModel(model.SockeyeModel):
                 # refinement encoder
                 # ref_encoded: (batch_size, max_seq_len, encoder_depth)
                 # ref_encoded: <2Y> x1 x2 ... xn <EOS>
-                # ref_encoded_length = max_seq_len
+                # ref_encoded_length = actual sample lengths
                 (ref_encoded,
                  ref_encoded_length,
                  ref_encoded_seq_len) = self.encoder.encode(sampling_source,

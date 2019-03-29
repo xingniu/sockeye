@@ -1102,6 +1102,10 @@ def add_training_args(params):
                               help="Blocks gradient computation for the previous prediction in the decoder. "
                                    "Default: %(default)s.")
 
+    train_params.add_argument('--sampling-soft-alignment',
+                               action='store_true',
+                               help='Soft-align the sampled target with the reference. Default: %(default)s.')
+
 
 def add_train_cli_args(params):
     add_training_io_args(params)

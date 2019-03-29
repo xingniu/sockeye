@@ -695,6 +695,7 @@ def create_training_model(config: model.ModelConfig,
                                             fixed_param_names=args.fixed_param_names,
                                             sampling_objectives=args.sampling_objectives,
                                             sampling_loss_weights=args.sampling_loss_weights,
+                                            sampling_soft_alignment=args.sampling_soft_alignment,
                                             instantiate_hidden=args.instantiate_hidden,
                                             decoder_block_grad_prev_prediction=args.decoder_block_grad_prev_prediction)
 

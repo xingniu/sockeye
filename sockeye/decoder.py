@@ -634,11 +634,15 @@ class RecurrentDecoder(Decoder):
         # layer_states: List[(batch_size, state_num_hidden]
         state = self.get_initial_state(source_encoded, source_encoded_lengths)
 
+        # lengths: (batch_size,)
+        if self.teacher_forcing_probability == 1.0:
+            lengths = target_embed_lengths
+        else:
+            lengths = mx.sym.zeros_like(target_embed_lengths)
         # initialize word_vec_prev_prediction to <BOS>: (batch_size, num_target_embed)
         word_vec_prev_prediction = target_embed[0]
         # hidden_all: target_embed_max_length * (batch_size, rnn_num_hidden)
         hidden_states = []  # type: List[mx.sym.Symbol]
-        word_predictions = []  # type: List[mx.sym.Symbol]
         # TODO: possible alternative: feed back the context vector instead of the hidden (see lamtram)
         self.reset()
         for seq_idx in range(target_embed_max_length):
@@ -694,22 +698,12 @@ class RecurrentDecoder(Decoder):
                     word_prev_prediction = mx.sym.argmax(word_prev_dist, axis=1, keepdims=True)
                     # word_vec_prev_prediction: (batch_size, num_target_embed)
                     word_vec_prev_prediction = mx.sym.dot(word_prev_dist, self.embedding_target.embed_weight)
-                word_predictions.append(word_prev_prediction)
+                lengths = lengths + mx.sym.reshape(word_prev_prediction != C.PAD_ID, shape=(-1))
             if self.decode_sequence_as_instantiated_hidden:
                 hidden_states.append(word_vec_prev_prediction)
             else:
                 hidden_states.append(state.hidden)
 
-        # lengths: (batch_size,)
-        if self.teacher_forcing_probability == 1.0:
-            lengths = target_embed_lengths
-        elif self.instantiate_hidden in {C.GUMBEL_SOFTMAX_NAME}:
-            lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
-        else:
-#            # concatenate along time axis: (batch_size, target_embed_max_length)
-#            target_predictions = mx.sym.concat(*word_predictions, dim=1)
-#            lengths = utils.compute_lengths(target_predictions)
-            lengths = mx.sym.ones_like(target_embed_lengths) * target_embed_max_length
         # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden/num_target_embed)
         target_hidden = mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
 
