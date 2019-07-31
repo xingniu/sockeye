@@ -70,18 +70,24 @@ class Loss(ABC):
     provides softmax outputs for forward() AND cross_entropy gradients for backward().
     """
 
-    def get_loss(self, logits: mx.sym.Symbol, labels: mx.sym.Symbol) -> List[mx.sym.Symbol]:
+    def get_loss(self,
+                 logits: mx.sym.Symbol,
+                 labels: mx.sym.Symbol,
+                 grad_scale: float = 1.0,
+                 prefix: str = '') -> List[mx.sym.Symbol]:
         """
         Returns loss and softmax output symbols given logits and integer-coded labels.
 
         :param logits: Shape: (batch_size * target_seq_len, target_vocab_size).
         :param labels: Shape: (batch_size * target_seq_len,).
+        :param grad_scale: Scale the gradient by a float factor.
+        :param prefix: Name prefix for the output.
         :return: List of loss and softmax output symbols.
         """
         raise NotImplementedError()
 
     @abstractmethod
-    def create_metric(self) -> EvalMetric:
+    def create_metric(self, output_names) -> EvalMetric:
         """
         Create an instance of the EvalMetric that corresponds to this Loss function.
         """
@@ -100,12 +106,18 @@ class CrossEntropyLoss(Loss):
                     loss_config.normalization_type, loss_config.label_smoothing)
         self.loss_config = loss_config
 
-    def get_loss(self, logits: mx.sym.Symbol, labels: mx.sym.Symbol) -> List[mx.sym.Symbol]:
+    def get_loss(self,
+                 logits: mx.sym.Symbol,
+                 labels: mx.sym.Symbol,
+                 grad_scale: float = 1.0,
+                 prefix: str = '') -> List[mx.sym.Symbol]:
         """
         Returns loss and softmax output symbols given logits and integer-coded labels.
 
         :param logits: Shape: (batch_size * target_seq_len, target_vocab_size).
         :param labels: Shape: (batch_size * target_seq_len,).
+        :param grad_scale: Scale the gradient by a float factor.
+        :param prefix: Name prefix for the output.
         :return: List of loss symbol.
         """
         if self.loss_config.normalization_type == C.LOSS_NORM_VALID:
@@ -116,14 +128,15 @@ class CrossEntropyLoss(Loss):
             raise ValueError("Unknown loss normalization type: %s" % self.loss_config.normalization_type)
         return [mx.sym.SoftmaxOutput(data=logits,
                                      label=labels,
+                                     grad_scale=grad_scale,
                                      ignore_label=C.PAD_ID,
                                      use_ignore=True,
                                      normalization=normalization,
                                      smooth_alpha=self.loss_config.label_smoothing,
-                                     name=C.SOFTMAX_NAME)]
+                                     name=prefix + C.SOFTMAX_NAME)]
 
-    def create_metric(self) -> "CrossEntropyMetric":
-        return CrossEntropyMetric(self.loss_config)
+    def create_metric(self, output_names) -> "CrossEntropyMetric":
+        return CrossEntropyMetric(self.loss_config, output_names=output_names)
 
 
 class CrossEntropyMetric(EvalMetric):

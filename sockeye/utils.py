@@ -1008,3 +1008,77 @@ def isfinite(data: mx.nd.NDArray) -> mx.nd.NDArray:
     is_data_not_nan = data == data
     is_data_not_infinite = data.abs() != np.inf
     return mx.nd.logical_and(is_data_not_infinite, is_data_not_nan)
+
+def gumbel_softmax(logits: mx.sym.Symbol,
+                   axis: int = 0,
+                   temperature: float = 1.0,
+                   noise_scale: float = 1.0,
+                   st: bool = False,
+                   eps: float = 1e-20) -> mx.sym.Symbol:
+    """
+    Sample categories from the Gumbel-Softmax distribution.
+    Categorical reparameterization with Gumbel-Softmax (https://arxiv.org/abs/1611.01144)
+    :param logits: e.g. unnormalized log-probs.
+    :param axis: Axis along which to calculate softmax.
+    :param temperature: Softmax temperature (non-negative scalar).
+    :param noise_scale: Gumbel noise scale.
+    :param st: Straight-Through Gumbel-Softmax.
+    :param eps: Parameter for Gumbel distribution.
+    :return: Sample distribution over categories.
+    """
+    gumbel_noise = -mx.sym.log(-mx.sym.log(mx.sym.random_uniform() + eps) + eps) * noise_scale
+    gs = mx.sym.softmax((logits + gumbel_noise) / temperature, axis=axis)
+    if st:
+        st_gs = mx.sym.broadcast_sub(gs, mx.sym.max(gs, axis=axis, keepdims=True)) == 0.0
+        return mx.sym.BlockGrad(st_gs - gs) + gs
+    return gs
+
+def softmax_cross_entropy(logits: mx.sym.Symbol,
+                          labels: mx.sym.Symbol,
+                          axis: int = -1,
+                          keepdims: bool = False,
+                          labels_valid: mx.sym.Symbol = None) -> mx.sym.Symbol:
+    """
+    Calculate cross entropy of softmax output and one-hot labels.
+    Softmax is computed along the last axis in logits
+    :param logits: Input logits. Shape: (D0, ..., Dn, Dn+1)
+    :param labels: Input labels. Shape: (D0, ..., Dn)
+    :param axis: Axis along which to perform the reduction.
+    :param keepdims: If this is set to True, the reduced axes are left in the result as dimension with size one.
+    :param labels_valid: Mask of valid labels. Shape: (D0, ..., Dn)
+    :return Softmax cross entropy. Shape: (D0, ..., 1, ..., Dn) if keepdims=True
+    """
+    log_softmax = mx.sym.log_softmax(logits)
+    log_softmax_pick = mx.sym.pick(log_softmax, labels)
+    if labels_valid is None:
+        return -mx.sym.sum(log_softmax_pick, axis=axis, keepdims=keepdims)
+    else:
+        log_softmax_pick_valid = mx.sym.broadcast_mul(log_softmax_pick, labels_valid)
+        sce = -mx.sym.sum(log_softmax_pick_valid, axis=axis, keepdims=keepdims)
+        valid_count = mx.sym.sum(labels_valid != 0, axis=axis, keepdims=keepdims)
+        return mx.sym.broadcast_div(sce, valid_count)
+
+def neg_log_softmax(logits: mx.sym.Symbol,
+                    labels: mx.sym.Symbol,
+                    labels_valid: mx.sym.Symbol) -> mx.sym.Symbol:
+    neg_log_softmax = -mx.sym.log_softmax(logits)
+    neg_log_softmax_pick = mx.sym.pick(neg_log_softmax, labels)
+    neg_log_softmax_pick_valid = mx.sym.broadcast_mul(neg_log_softmax_pick, labels_valid)
+    return neg_log_softmax_pick_valid
+
+def cross_entropy_delta(logits_1: mx.sym.Symbol,
+                        logits_2: mx.sym.Symbol,
+                        labels: mx.sym.Symbol,
+                        labels_valid: mx.sym.Symbol = None) -> mx.sym.Symbol:
+    if labels_valid is None:
+        labels_valid = mx.sym.ones_like(labels)
+    neg_log_softmax_pick_1 = neg_log_softmax(logits_1, labels, labels_valid)
+    neg_log_softmax_pick_2 = neg_log_softmax(logits_2, labels, labels_valid)
+    return neg_log_softmax_pick_1, neg_log_softmax_pick_2, neg_log_softmax_pick_1 - neg_log_softmax_pick_2
+
+def std(data: mx.sym.Symbol, axis: int = 0) -> mx.sym.Symbol:
+    data_mean = mx.sym.mean(data, axis=axis, keepdims=True)
+    data_sub_mean = mx.sym.broadcast_sub(data, data_mean)
+    data_sub_mean_square = mx.sym.square(data_sub_mean)
+    data_sub_mean_square_mean = mx.sym.mean(data_sub_mean_square, axis=axis, keepdims=True)
+    return mx.sym.broadcast_like(mx.sym.sqrt(data_sub_mean_square_mean), data)

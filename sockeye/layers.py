@@ -167,6 +167,7 @@ class OutputLayer:
     :param hidden_size: Decoder hidden size.
     :param vocab_size: Target vocabulary size.
     :param weight_normalization: Whether to apply weight normalization.
+    :param two_biases: One bias for each style.
     :param prefix: Prefix used for naming.
     """
 
@@ -175,6 +176,7 @@ class OutputLayer:
                  vocab_size: int,
                  weight: Optional[mx.sym.Symbol],
                  weight_normalization: bool,
+                 two_biases: bool,
                  prefix: str = C.DEFAULT_OUTPUT_LAYER_PREFIX) -> None:
         self.vocab_size = vocab_size
         self.prefix = prefix
@@ -193,10 +195,16 @@ class OutputLayer:
                                                    prefix=self.prefix)
             self.w = self.weight_norm()
 
-        self.b = mx.sym.Variable("%sbias" % self.prefix)
+        self.two_biases = two_biases
+        if two_biases:
+            self.bf = mx.sym.Variable("%sformal_bias" % self.prefix)
+            self.bi = mx.sym.Variable("%sinformal_bias" % self.prefix)
+        else:
+            self.b = mx.sym.Variable("%sbias" % self.prefix)
 
     def __call__(self,
                  hidden: Union[mx.sym.Symbol, mx.nd.NDArray],
+                 tiled_tags: mx.sym.Symbol = None,
                  weight: Optional[mx.nd.NDArray] = None,
                  bias: Optional[mx.nd.NDArray] = None):
         """
@@ -207,12 +215,29 @@ class OutputLayer:
         """
         if isinstance(hidden, mx.sym.Symbol):
             # TODO dropout?
-            return mx.sym.FullyConnected(data=hidden,
-                                         num_hidden=self.vocab_size,
-                                         weight=self.w,
-                                         bias=self.b,
-                                         flatten=False,
-                                         name=C.LOGITS_NAME)
+            if self.two_biases:
+                logits_f = mx.sym.FullyConnected(data=hidden,
+                                                 num_hidden=self.vocab_size,
+                                                 weight=self.w,
+                                                 bias=self.bf,
+                                                 flatten=False,
+                                                 name=C.LOGITS_NAME+"_F")
+                logits_f = mx.sym.broadcast_mul(logits_f, tiled_tags == C.FORMAL_ID)
+                logits_i = mx.sym.FullyConnected(data=hidden,
+                                                 num_hidden=self.vocab_size,
+                                                 weight=self.w,
+                                                 bias=self.bi,
+                                                 flatten=False,
+                                                 name=C.LOGITS_NAME+"_I")
+                logits_i = mx.sym.broadcast_mul(logits_i, tiled_tags == C.INFORMAL_ID)
+                return logits_f + logits_i
+            else:
+                return mx.sym.FullyConnected(data=hidden,
+                                             num_hidden=self.vocab_size,
+                                             weight=self.w,
+                                             bias=self.b,
+                                             flatten=False,
+                                             name=C.LOGITS_NAME)
 
         # Equivalent NDArray implementation (requires passed weights/biases)
         assert isinstance(hidden, mx.nd.NDArray)

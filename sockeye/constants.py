@@ -21,10 +21,16 @@ BOS_SYMBOL = "<s>"
 EOS_SYMBOL = "</s>"
 UNK_SYMBOL = "<unk>"
 PAD_SYMBOL = "<pad>"
+FORMAL_SYMBOL = "<2formal>"
+INFORMAL_SYMBOL = "<2informal>"
+TOUNK_SYMBOL = "<2unk>"
 PAD_ID = 0
+FORMAL_ID = 4
+INFORMAL_ID = 5
+TOUNK_ID = 6
 PAD_FORMAT = "<pad%d>"
 TOKEN_SEPARATOR = " "
-VOCAB_SYMBOLS = [PAD_SYMBOL, UNK_SYMBOL, BOS_SYMBOL, EOS_SYMBOL]
+VOCAB_SYMBOLS = [PAD_SYMBOL, UNK_SYMBOL, BOS_SYMBOL, EOS_SYMBOL, FORMAL_SYMBOL, INFORMAL_SYMBOL, TOUNK_SYMBOL]
 # reserve extra space for the EOS or BOS symbol that is added to both source and target
 SPACE_FOR_XOS = 1
 
@@ -178,6 +184,7 @@ SOURCE_LENGTH_NAME = "source_length"
 TARGET_NAME = "target"
 TARGET_LABEL_NAME = "target_label"
 LEXICON_NAME = "lexicon"
+TAG_NAME = "tag"
 
 SOURCE_ENCODED_NAME = "encoded_source"
 TARGET_PREVIOUS_NAME = "prev_target_word_id"
@@ -343,6 +350,7 @@ OUTPUT_HANDLER_TRANSLATION_WITH_ALIGNMENTS = "translation_with_alignments"
 OUTPUT_HANDLER_TRANSLATION_WITH_ALIGNMENT_MATRIX = "translation_with_alignment_matrix"
 OUTPUT_HANDLER_SCORE = "score"
 OUTPUT_HANDLER_PAIR_WITH_SCORE = "pair_with_score"
+OUTPUT_HANDLER_PAIR_WITH_INFO = "pair_with_info"
 OUTPUT_HANDLER_BENCHMARK = "benchmark"
 OUTPUT_HANDLER_ALIGN_PLOT = "align_plot"
 OUTPUT_HANDLER_ALIGN_TEXT = "align_text"
@@ -441,3 +449,32 @@ AVERAGE_BEST = 'best'
 AVERAGE_LAST = 'last'
 AVERAGE_LIFESPAN = 'lifespan'
 AVERAGE_CHOICES = [AVERAGE_BEST, AVERAGE_LAST, AVERAGE_LIFESPAN]
+
+# conditional decoder
+CD_TAG_ATTENTION = 'cd-tag-attention'
+CD_OUTPUT_BIAS = 'cd-output-bias'
+CD_PREV_EMBED_CONCAT = 'cd-prev-embed-concat'
+CD_PREV_EMBED_SUM = 'cd-prev-embed-sum'
+CD_BOS_EMBED = 'cd-bos-embed'
+CD_CHOICES = [CD_TAG_ATTENTION, CD_OUTPUT_BIAS, CD_PREV_EMBED_CONCAT, CD_PREV_EMBED_SUM, CD_BOS_EMBED]
+
+# sampling objectives and their prefixes
+CONSISTENCY = "consistency"
+CONSISTENCY_PREFIX = CONSISTENCY + '_'
+SAMPLING_OBJECTIVES = [CONSISTENCY]
+
+CONSISTENCY_SOFTMAX_OUTPUT_NAME = CONSISTENCY_PREFIX + SOFTMAX_OUTPUT_NAME
+
+# instantiating hidden states
+ARGMAX_NAME = "argmax"
+SOFTMAX_SAMPLE_NAME = "softmax-sample"
+GUMBEL_SOFTMAX_NAME = "gumbel-softmax"
+ST_GUMBEL_SOFTMAX_NAME = "st-gumbel-softmax"
+INSTANTIATING_HIDDEN_CHOICES = [ARGMAX_NAME, SOFTMAX_SAMPLE_NAME, GUMBEL_SOFTMAX_NAME, ST_GUMBEL_SOFTMAX_NAME]
+
+# decoder output types
+DECODE_TYPE_HIDDEN = "hidden"
+DECODE_TYPE_EMBED = "embed"
+DECODE_TYPE_WORD = "word"
+DECODE_TYPE_LOGITS = "logits"
+DECODE_TYPE_DIST = "dist"

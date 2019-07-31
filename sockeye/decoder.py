@@ -16,7 +16,7 @@ Decoders for sequence-to-sequence models.
 """
 import logging
 from abc import ABC, abstractmethod
-from typing import Callable, cast, Dict, List, NamedTuple, Optional, Tuple, Union, Type
+from typing import Callable, cast, Dict, List, NamedTuple, Optional, Tuple, Union, Type, Any
 
 import mxnet as mx
 
@@ -89,6 +89,11 @@ class Decoder(ABC):
     def __init__(self, dtype):
         logger.info('{}.{} dtype: {}'.format(self.__module__, self.__class__.__name__, dtype))
         self.dtype = dtype
+        self.teacher_forcing = True
+        self.instantiate_hidden = None
+        self.decode_type = [C.DECODE_TYPE_HIDDEN]
+        self.softmax_temperature = 1.0
+        self.gumbel_noise_scale = 1.0
 
     @abstractmethod
     def decode_sequence(self,
@@ -195,6 +200,21 @@ class Decoder(ABC):
         :return: The maximum length supported by the decoder if such a restriction exists.
         """
         return None
+
+    def set_instantiate_hidden(self,
+                               instantiate_hidden: str,
+                               output_layer: layers.OutputLayer,
+                               embedding_target: encoder.Embedding,
+                               softmax_temperature: float = 1.0,
+                               gumbel_noise_scale: float = 1.0):
+        """
+        Sets the instantiating method when instantiating hidden states is needed.
+        """
+        self.instantiate_hidden = instantiate_hidden
+        self.output_layer = output_layer
+        self.embedding_target = embedding_target
+        self.softmax_temperature = softmax_temperature
+        self.gumbel_noise_scale = gumbel_noise_scale
 
 
 @Decoder.register(transformer.TransformerConfig, C.TRANSFORMER_DECODER_PREFIX)
@@ -447,6 +467,7 @@ class RecurrentDecoderConfig(Config):
     :param max_seq_len_source: Maximum source sequence length
     :param rnn_config: RNN configuration.
     :param attention_config: Attention configuration.
+    :param conditional_decoder: Type of conditional decoder and its parameter (size of embeddings).
     :param hidden_dropout: Dropout probability on next decoder hidden state.
     :param state_init: Type of RNN decoder state initialization: zero, last, average.
     :param state_init_lhuc: Apply LHUC for encoder to decoder initialization.
@@ -462,6 +483,7 @@ class RecurrentDecoderConfig(Config):
                  max_seq_len_source: int,
                  rnn_config: rnn.RNNConfig,
                  attention_config: rnn_attention.AttentionConfig,
+                 conditional_decoder: tuple,
                  hidden_dropout: float = .0,
                  state_init: str = C.RNN_DEC_INIT_LAST,
                  state_init_lhuc: bool = False,
@@ -475,6 +497,8 @@ class RecurrentDecoderConfig(Config):
         self.max_seq_len_source = max_seq_len_source
         self.rnn_config = rnn_config
         self.attention_config = attention_config
+        self.conditional_decoder = conditional_decoder[0]
+        self.num_style_embed = conditional_decoder[1]
         self.hidden_dropout = hidden_dropout
         self.state_init = state_init
         self.state_init_lhuc = state_init_lhuc
@@ -544,6 +568,12 @@ class RecurrentDecoder(Decoder):
         if self.config.layer_normalization:
             self.hidden_norm = layers.LayerNormalization(prefix="%shidden_norm" % prefix)
 
+        # Style embedding
+        if self.config.conditional_decoder in [C.CD_TAG_ATTENTION, C.CD_PREV_EMBED_CONCAT,
+                                               C.CD_PREV_EMBED_SUM, C.CD_BOS_EMBED]:
+            self.embed_f = mx.sym.Variable("%sformal_weight" % self.prefix, shape=(1, self.config.num_style_embed))
+            self.embed_i = mx.sym.Variable("%sinformal_weight" % self.prefix, shape=(1, self.config.num_style_embed))
+
     def _create_state_init_parameters(self):
         """
         Creates parameters for encoder last state transformation into decoder layer initial states.
@@ -566,7 +596,8 @@ class RecurrentDecoder(Decoder):
                         source_encoded_max_length: int,
                         target_embed: mx.sym.Symbol,
                         target_embed_lengths: mx.sym.Symbol,
-                        target_embed_max_length: int) -> mx.sym.Symbol:
+                        target_embed_max_length: int,
+                        tags: Optional[mx.sym.Symbol]) -> Tuple[Any, mx.sym.Symbol, int]:
         """
         Decodes a sequence of embedded target words and returns sequence of last decoder
         representations for each time step.
@@ -577,7 +608,8 @@ class RecurrentDecoder(Decoder):
         :param target_embed: Embedded target sequence. Shape: (batch_size, target_embed_max_length, target_num_embed).
         :param target_embed_lengths: Lengths of embedded target sequences. Shape: (batch_size,).
         :param target_embed_max_length: Dimension of the embedded target sequence.
-        :return: Decoder data. Shape: (batch_size, target_embed_max_length, decoder_depth).
+        :param tags: Style tags. Shape: (batch_size, 1).
+        :return: Decoder data. Shape: (batch_size, target_embed_max_length, decoder_depth/num_target_embed).
         """
 
         # target_embed: target_seq_len * (batch_size, num_target_embed)
@@ -592,8 +624,13 @@ class RecurrentDecoder(Decoder):
                                                   use_sequence_length=True)
 
         # get recurrent attention function conditioned on source
-        attention_func = self.attention.on(source_encoded, source_encoded_lengths,
-                                           source_encoded_max_length)
+        if self.config.conditional_decoder == C.CD_TAG_ATTENTION:
+            attention_func = self.attention.on(self._modify_source_encoded(source_encoded, tags),
+                                               source_encoded_lengths + 1,
+                                               source_encoded_max_length)
+        else:
+            attention_func = self.attention.on(source_encoded, source_encoded_lengths,
+                                               source_encoded_max_length)
         attention_state = self.attention.get_initial_state(source_encoded_lengths, source_encoded_max_length)
 
         # initialize decoder states
@@ -601,28 +638,94 @@ class RecurrentDecoder(Decoder):
         # layer_states: List[(batch_size, state_num_hidden]
         state = self.get_initial_state(source_encoded, source_encoded_lengths)
 
-        # hidden_all: target_embed_max_length * (batch_size, rnn_num_hidden)
-        hidden_states = []  # type: List[mx.sym.Symbol]
+        # lengths: (batch_size,)
+        if self.teacher_forcing:
+            lengths = target_embed_lengths
+        else:
+            lengths = mx.sym.zeros_like(target_embed_lengths)
+        # initialize word_vec_prev_prediction to <BOS>: (batch_size, num_target_embed)
+        word_vec_prev_prediction = target_embed[0]
+        # each 'states': target_embed_max_length * (batch_size, rnn_num_hidden)
+        states_dict = {key:[] for key in self.decode_type} # type of 'states': List[mx.sym.Symbol]
         # TODO: possible alternative: feed back the context vector instead of the hidden (see lamtram)
         self.reset()
         for seq_idx in range(target_embed_max_length):
-            # hidden: (batch_size, rnn_num_hidden)
-            state, attention_state = self._step(target_embed[seq_idx],
+            # word_vec_prev: (batch_size, num_target_embed)
+            if self.teacher_forcing:
+                word_vec_prev = target_embed[seq_idx]
+            else:
+                word_vec_prev = word_vec_prev_prediction
+
+            state, attention_state = self._step(self._modify_embed(seq_idx == 0, word_vec_prev, tags),
                                                 state,
                                                 attention_func,
                                                 attention_state,
                                                 seq_idx,
                                                 enc_last_hidden=enc_last_hidden)
-            hidden_states.append(state.hidden)
 
-        # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden)
-        return mx.sym.stack(*hidden_states, axis=1, name='%shidden_stack' % self.prefix)
+            if not self.teacher_forcing:
+                # logits: (batch_size, vocab_size)
+                logits = self.output_layer(state.hidden)
+                if self.instantiate_hidden == C.ARGMAX_NAME:
+                    # word_prev_prediction: (batch_size, 1)
+                    word_prev_prediction = mx.sym.argmax(logits, axis=1, keepdims=True)
+                    # word_vec_prev_prediction: (batch_size, 1, num_target_embed)
+                    word_vec_prev_prediction, _, _ = self.embedding_target.encode(data=word_prev_prediction,
+                                                                                  data_length=None,
+                                                                                  seq_len=1)
+                    # word_vec_prev_prediction: (batch_size, num_target_embed)
+                    word_vec_prev_prediction = mx.sym.squeeze(word_vec_prev_prediction, axis=1)
+                elif self.instantiate_hidden == C.SOFTMAX_SAMPLE_NAME:
+                    if self.softmax_temperature != 1.0:
+                        logits = logits / self.softmax_temperature
+                    # word_prev_dist: (batch_size, vocab_size)
+                    word_prev_dist = mx.sym.softmax(logits, axis=1)
+                    # word_prev_prediction: (batch_size, 1)
+                    word_prev_prediction = mx.sym.sample_multinomial(word_prev_dist, shape=1)
+                    # word_vec_prev_prediction: (batch_size, 1, num_target_embed)
+                    word_vec_prev_prediction, _, _ = self.embedding_target.encode(data=word_prev_prediction,
+                                                                                  data_length=None,
+                                                                                  seq_len=1)
+                    # word_vec_prev_prediction: (batch_size, num_target_embed)
+                    word_vec_prev_prediction = mx.sym.squeeze(word_vec_prev_prediction, axis=1)
+                elif self.instantiate_hidden in {C.GUMBEL_SOFTMAX_NAME, C.ST_GUMBEL_SOFTMAX_NAME}:
+                    # word_prev_dist: (batch_size, vocab_size)
+                    word_prev_dist = utils.gumbel_softmax(logits,
+                                                          temperature=self.softmax_temperature,
+                                                          noise_scale=self.gumbel_noise_scale,
+                                                          st=self.instantiate_hidden==C.ST_GUMBEL_SOFTMAX_NAME,
+                                                          axis=1)
+                    # word_prev_prediction: (batch_size, 1)
+                    word_prev_prediction = mx.sym.argmax(word_prev_dist, axis=1, keepdims=True)
+                    # word_vec_prev_prediction: (batch_size, num_target_embed)
+                    word_vec_prev_prediction = mx.sym.dot(word_prev_dist, self.embedding_target.embed_weight)
+                lengths = lengths + mx.sym.reshape(word_prev_prediction != C.PAD_ID, shape=(-1))
+
+            if C.DECODE_TYPE_HIDDEN in self.decode_type:
+                states_dict[C.DECODE_TYPE_HIDDEN].append(state.hidden)
+            if C.DECODE_TYPE_EMBED in self.decode_type:
+                states_dict[C.DECODE_TYPE_EMBED].append(word_vec_prev_prediction)
+            if C.DECODE_TYPE_WORD in self.decode_type:
+                states_dict[C.DECODE_TYPE_WORD].append(word_prev_prediction)
+            if C.DECODE_TYPE_LOGITS in self.decode_type:
+                states_dict[C.DECODE_TYPE_LOGITS].append(logits)
+            if C.DECODE_TYPE_DIST in self.decode_type:
+                states_dict[C.DECODE_TYPE_DIST].append(word_prev_dist)
+
+        for key in self.decode_type:
+             # concatenate along time axis: (batch_size, target_embed_max_length, rnn_num_hidden/num_target_embed/1/vocab_size)
+            states_dict[key] = mx.sym.stack(*states_dict[key], axis=1, name='%s%s_stack' % (self.prefix, key))
+        if len(states_dict) == 1:
+            return states_dict[self.decode_type[0]], lengths, target_embed_max_length
+        else:
+            return states_dict, lengths, target_embed_max_length
 
     def decode_step(self,
                     step: int,
                     target_embed_prev: mx.sym.Symbol,
                     source_encoded_max_length: int,
-                    *states: mx.sym.Symbol) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, List[mx.sym.Symbol]]:
+                    *states: mx.sym.Symbol,
+                    tiled_tags: Optional[mx.sym.Symbol]) -> Tuple[mx.sym.Symbol, mx.sym.Symbol, List[mx.sym.Symbol]]:
         """
         Decodes a single time step given the current step, the previous embedded target word,
         and previous decoder states.
@@ -633,6 +736,7 @@ class RecurrentDecoder(Decoder):
         :param target_embed_prev: Previous target word embedding. Shape: (batch_size, target_num_embed).
         :param source_encoded_max_length: Length of encoded source time dimension.
         :param states: Arbitrary list of decoder states.
+        :param tiled_tags: Style tags. Shape: (batch_size, 1).
         :return: logit inputs, attention probabilities, next decoder states.
         """
         source_encoded, prev_dynamic_source, source_encoded_length, prev_hidden, *layer_states = states
@@ -645,7 +749,12 @@ class RecurrentDecoder(Decoder):
                                                   axis=1,
                                                   use_sequence_length=True)
 
-        attention_func = self.attention.on(source_encoded, source_encoded_length, source_encoded_max_length)
+        if self.config.conditional_decoder == C.CD_TAG_ATTENTION:
+            attention_func = self.attention.on(self._modify_source_encoded(source_encoded, tiled_tags),
+                                               source_encoded_length + 1,
+                                               source_encoded_max_length)
+        else:
+            attention_func = self.attention.on(source_encoded, source_encoded_length, source_encoded_max_length)
 
         prev_state = RecurrentDecoderState(prev_hidden, list(layer_states))
         prev_attention_state = rnn_attention.AttentionState(context=None, probs=None,
@@ -654,7 +763,7 @@ class RecurrentDecoder(Decoder):
         # state.hidden: (batch_size, rnn_num_hidden)
         # attention_state.dynamic_source: (batch_size, source_seq_len, coverage_num_hidden)
         # attention_state.probs: (batch_size, source_seq_len)
-        state, attention_state = self._step(target_embed_prev,
+        state, attention_state = self._step(self._modify_embed(step == 1, target_embed_prev, tiled_tags),
                                             prev_state,
                                             attention_func,
                                             prev_attention_state,
@@ -935,6 +1044,48 @@ class RecurrentDecoder(Decoder):
         hidden = mx.sym.Activation(data=hidden, act_type="tanh",
                                    name="%snext_hidden_t%d" % (self.prefix, seq_idx))
         return hidden
+
+    def _tags_embed(self, tags: mx.sym.Symbol) -> mx.sym.Symbol:
+        # tags: (N, 1)
+        # tags_embed_mask: (N, num_style_embed)
+        tags_embed_mask = tags.tile(reps=(1, self.config.num_style_embed))
+        # tags_embed: (N, num_style_embed)
+        tags_embed_f = mx.sym.broadcast_mul(tags_embed_mask == C.FORMAL_ID, self.embed_f)
+        tags_embed_i = mx.sym.broadcast_mul(tags_embed_mask == C.INFORMAL_ID, self.embed_i)
+        # return: (N, num_style_embed)
+        return tags_embed_f + tags_embed_i
+
+    def _modify_embed(self, is_bos: bool, word_vec_prev: mx.sym.Symbol, tags: mx.sym.Symbol) -> mx.sym.Symbol:
+        # word_vec_prev: (N, num_target_embed)
+        # tags: (N, 1)
+        if self.config.conditional_decoder in [C.CD_PREV_EMBED_CONCAT, C.CD_PREV_EMBED_SUM, C.CD_BOS_EMBED]:
+            # tags_embed: (N, num_style_embed)
+            tags_embed = self._tags_embed(tags)
+            if self.config.conditional_decoder == C.CD_PREV_EMBED_CONCAT:
+                # concat_embed: (N, num_target_embed + num_style_embed)
+                return mx.sym.concat(word_vec_prev, tags_embed, dim=1)
+            elif self.config.conditional_decoder == C.CD_PREV_EMBED_SUM:
+                # num_style_embed = num_target_embed
+                # return: (N, num_target_embed)
+                return tags_embed + word_vec_prev
+            elif self.config.conditional_decoder == C.CD_BOS_EMBED:
+                # num_style_embed = num_target_embed
+                # return: (N, num_target_embed)
+                return tags_embed * int(is_bos) + word_vec_prev * int(not is_bos)
+        elif self.config.conditional_decoder == C.CD_OUTPUT_BIAS or tags is None:
+            return word_vec_prev
+        else:
+            # dummy tags
+            return mx.sym.broadcast_add(word_vec_prev, tags * 0)
+
+    def _modify_source_encoded(self, source_encoded: mx.sym.Symbol, tags: mx.sym.Symbol) -> mx.sym.Symbol:
+        # source_encoded: (N, source_encoded_max_length, encoder_depth)
+        # tags_embed: (N, num_style_embed=encoder_depth)
+        tags_embed = self._tags_embed(tags)
+        # source_encoded_tag: (N, 1, encoder_depth)
+        source_encoded_tag = tags_embed.expand_dims(axis=1)
+        # return: (N, source_encoded_max_length+1, encoder_depth)
+        return mx.sym.concat(source_encoded_tag, source_encoded, dim=1)
 
 
 class ConvolutionalDecoderConfig(Config):

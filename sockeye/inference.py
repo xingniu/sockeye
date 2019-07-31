@@ -224,6 +224,9 @@ class InferenceModel(model.SockeyeModel):
             states = self.decoder.state_variables(decode_step)
             state_names = [state.name for state in states]
 
+            # tags: (batch_size, 1)
+            tags = mx.sym.Variable(C.TAG_NAME)
+
             # embedding for previous word
             # (batch_size, num_embed)
             target_embed_prev, _, _ = self.embedding_target.encode(data=target_prev, data_length=None, seq_len=1)
@@ -235,14 +238,15 @@ class InferenceModel(model.SockeyeModel):
              states) = self.decoder.decode_step(decode_step,
                                                 target_embed_prev,
                                                 source_encoded_seq_len,
-                                                *states)
+                                                *states,
+                                                tiled_tags=tags)
 
             if self.decoder_return_logit_inputs:
                 # skip output layer in graph
                 outputs = mx.sym.identity(target_decoded, name=C.LOGIT_INPUTS_NAME)
             else:
                 # logits: (batch_size, target_vocab_size)
-                logits = self.output_layer(target_decoded)
+                logits = self.output_layer(target_decoded, tags)
                 if self.softmax_temperature is not None:
                     logits = logits / self.softmax_temperature
                 if self.skip_softmax:
@@ -251,7 +255,7 @@ class InferenceModel(model.SockeyeModel):
                 else:
                     outputs = mx.sym.softmax(data=logits, name=C.SOFTMAX_NAME)
 
-            data_names = [C.TARGET_NAME] + state_names
+            data_names = [C.TAG_NAME, C.TARGET_NAME] + state_names
             label_names = []  # type: List[str]
             return mx.sym.Group([outputs, attention_probs] + states), data_names, label_names
 
@@ -283,7 +287,9 @@ class InferenceModel(model.SockeyeModel):
         :return: List of data descriptions.
         """
         source_max_length, target_max_length = bucket_key
-        return [mx.io.DataDesc(name=C.TARGET_NAME, shape=(batch_beam_size,),
+        return [mx.io.DataDesc(name=C.TAG_NAME, shape=(batch_beam_size,1),
+                               layout="NT"),
+                mx.io.DataDesc(name=C.TARGET_NAME, shape=(batch_beam_size,),
                                layout="NT")] + self.decoder.state_shapes(batch_beam_size,
                                                                          target_max_length,
                                                                          self.encoder.get_encoded_seq_len(
@@ -319,18 +325,20 @@ class InferenceModel(model.SockeyeModel):
     def run_decoder(self,
                     prev_word: mx.nd.NDArray,
                     bucket_key: Tuple[int, int],
+                    tags: mx.nd.NDArray,
                     model_state: 'ModelState') -> Tuple[mx.nd.NDArray, mx.nd.NDArray, 'ModelState']:
         """
         Runs forward pass of the single-step decoder.
 
         :param prev_word: Previous word ids. Shape: (batch*beam,).
         :param bucket_key: Bucket key.
+        :param tags: Style tags. Shape: (batch*beam, 1).
         :param model_state: Model states.
         :return: Decoder stack output (logit inputs or probability distribution), attention scores, updated model state.
         """
         batch_beam_size = prev_word.shape[0]
         batch = mx.io.DataBatch(
-            data=[prev_word.as_in_context(self.context)] + model_state.states,
+            data=[tags, prev_word.as_in_context(self.context)] + model_state.states,
             label=None,
             bucket_key=bucket_key,
             provide_data=self._get_decoder_data_shapes(bucket_key, batch_beam_size))
@@ -1618,6 +1626,7 @@ class Translator:
                      step: int,
                      source_length: int,
                      states: List[ModelState],
+                     tags: mx.nd.NDArray,
                      models_output_layer_w: List[mx.nd.NDArray],
                      models_output_layer_b: List[mx.nd.NDArray]) \
             -> Tuple[mx.nd.NDArray, mx.nd.NDArray, List[ModelState]]:
@@ -1628,6 +1637,7 @@ class Translator:
         :param step: Beam search iteration.
         :param source_length: Length of the input sequence.
         :param states: List of model states.
+        :param tags: Style tags. Shape: (batch_size * beam_size, 1).
         :param models_output_layer_w: Custom model weights for logit computation (empty for none).
         :param models_output_layer_b: Custom model biases for logit computation (empty for none).
         :return: (scores, attention scores, list of model states)
@@ -1638,7 +1648,7 @@ class Translator:
         # We use zip_longest here since we'll have empty lists when not using restrict_lexicon
         for model, out_w, out_b, state in itertools.zip_longest(
                 self.models, models_output_layer_w, models_output_layer_b, states):
-            decoder_out, attention_probs, state = model.run_decoder(prev_word, bucket_key, state)
+            decoder_out, attention_probs, state = model.run_decoder(prev_word, bucket_key, tags, state)
             # Compute logits and softmax with restricted vocabulary
             if self.restrict_lexicon:
                 # Apply output layer outside decoder module.
@@ -1797,6 +1807,16 @@ class Translator:
         # (0) encode source sentence, returns a list
         model_states = self._encode(source, source_length)
 
+        source_words, *factor_split = utils.split(source, num_outputs=self.num_source_factors, axis=2, squeeze_axis=True)
+        if self.models[0].config.conditional_decoder is not None:
+            # tags: (batch_size, 1)
+            tags = factor_split[-1].slice_axis(axis=1, begin=0, end=1)
+        else:
+            # dummy tags: (batch_size, 1)
+            tags = source_words.slice_axis(axis=1, begin=0, end=1)
+        # tiled_tags: (batch_size * beam_size, 1)
+        tiled_tags = tags.tile(reps=(1,self.beam_size)).reshape(shape=(-3,1))
+
         # Initialize the beam to track constraint sets, where target-side lexical constraints are present
         constraints = constrained.init_batch(raw_constraint_list, self.beam_size, self.start_id,
                                              self.vocab_target[C.EOS_SYMBOL])
@@ -1819,6 +1839,7 @@ class Translator:
                                                                              step=t,
                                                                              source_length=source_length,
                                                                              states=model_states,
+                                                                             tags=tiled_tags,
                                                                              models_output_layer_w=models_output_layer_w,
                                                                              models_output_layer_b=models_output_layer_b)
 

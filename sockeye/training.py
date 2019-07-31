@@ -56,6 +56,10 @@ class TrainingModel(model.SockeyeModel):
             unrolled to the full length.
     :param gradient_compression_params: Optional dictionary of gradient compression parameters.
     :param fixed_param_names: Optional list of params to fix during training (i.e. their values will not be trained).
+    :param sampling_objectives: Sampling-based objectives.
+    :param sampling_loss_weights: The weights for sampling losses.
+    :param adaptive_tagging: Assign formality tags adaptively.
+    :param instantiate_hidden: Use instantiated hidden states as previous target embeddings.
     """
 
     def __init__(self,
@@ -67,11 +71,19 @@ class TrainingModel(model.SockeyeModel):
                  default_bucket_key: Tuple[int, int],
                  bucketing: bool,
                  gradient_compression_params: Optional[Dict[str, Any]] = None,
-                 fixed_param_names: Optional[List[str]] = None) -> None:
+                 fixed_param_names: Optional[List[str]] = None,
+                 sampling_objectives: Optional[List[str]] = [],
+                 sampling_loss_weights: Optional[List[float]] = [0.5],
+                 adaptive_tagging: bool = False,
+                 instantiate_hidden: str = None) -> None:
         super().__init__(config)
         self.context = context
         self.output_dir = output_dir
         self.fixed_param_names = fixed_param_names
+        self.sampling_objectives = sampling_objectives
+        self.sampling_loss_weights = sampling_loss_weights
+        self.adaptive_tagging = adaptive_tagging
+        self.instantiate_hidden = instantiate_hidden
         self._bucketing = bucketing
         self._gradient_compression_params = gradient_compression_params
         self._initialize(provide_data, provide_label, default_bucket_key)
@@ -84,13 +96,38 @@ class TrainingModel(model.SockeyeModel):
         """
         Initializes model components, creates training symbol and module, and binds it.
         """
+        # source: (batch_size, seq_length, num_factors)
         source = mx.sym.Variable(C.SOURCE_NAME)
-        source_words = source.split(num_outputs=self.config.config_embed_source.num_factors,
-                                    axis=2, squeeze_axis=True)[0]
+        # source_words: (batch_size, seq_length)
+        source_words, *factor_split = source.split(num_outputs=self.config.config_embed_source.num_factors,
+                                                   axis=2, squeeze_axis=True)
+        # tags: (batch_size, 1)
+        tags = factor_split[-1].slice_axis(axis=1, begin=0, end=1) if self.config.conditional_decoder is not None else None
         source_length = utils.compute_lengths(source_words)
+        # target: (batch_size, seq_length)
         target = mx.sym.Variable(C.TARGET_NAME)
         target_length = utils.compute_lengths(target)
-        labels = mx.sym.reshape(data=mx.sym.Variable(C.TARGET_LABEL_NAME), shape=(-1,))
+        # reference: (batch_size, seq_length)
+        reference = mx.sym.Variable(C.TARGET_LABEL_NAME)
+        # labels: (batch_size*seq_length)
+        labels = mx.sym.reshape(data=reference, shape=(-1,))
+
+        if len(self.sampling_objectives) > 0:
+            reference_length = utils.compute_lengths(reference)
+
+            self.decoder.set_instantiate_hidden(instantiate_hidden=self.instantiate_hidden,
+                                                output_layer=self.output_layer,
+                                                embedding_target=self.embedding_target,
+                                                softmax_temperature=self.config.softmax_temperature,
+                                                gumbel_noise_scale=self.config.gumbel_noise_scale)
+
+            num_losses = len(self.sampling_objectives)
+            if len(self.sampling_loss_weights) == 1:
+                self.sampling_loss_weight_total = self.sampling_loss_weights[0]
+                self.sampling_loss_weights = [self.sampling_loss_weight_total / num_losses] * num_losses
+            else:
+                self.sampling_loss_weight_total = sum(self.sampling_loss_weights)
+            self.objective_weight = {self.sampling_objectives[i]: self.sampling_loss_weights[i] for i in range(num_losses)}
 
         self.model_loss = loss.get_loss(self.config.config_loss)
 
@@ -105,7 +142,7 @@ class TrainingModel(model.SockeyeModel):
         utils.check_condition(provide_label_names == label_names,
                               "incompatible provide_label: %s, names should be %s" % (provide_label_names, label_names))
 
-        def sym_gen(seq_lens):
+        def sym_gen_standard(seq_lens):
             """
             Returns a (grouped) loss symbol given source & target input lengths.
             Also returns data and label names for the BucketingModule.
@@ -131,9 +168,374 @@ class TrainingModel(model.SockeyeModel):
                                                            source_embed_seq_len)
 
             # decoder
-            # target_decoded: (batch-size, target_len, decoder_depth)
-            target_decoded = self.decoder.decode_sequence(source_encoded, source_encoded_length, source_encoded_seq_len,
-                                                          target_embed, target_embed_length, target_embed_seq_len)
+            # target_decoded: (batch_size, target_len, decoder_depth)
+            (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded,
+                                                                  source_encoded_length,
+                                                                  source_encoded_seq_len,
+                                                                  target_embed,
+                                                                  target_embed_length,
+                                                                  target_embed_seq_len,
+                                                                  tags=tags)
+
+            # target_decoded: (batch_size * target_seq_len, decoder_depth)
+            target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
+
+            # tiled_tags: (batch_size * target_embed_seq_len, 1)
+            tiled_tags = tags.tile(reps=(1,target_embed_seq_len)).reshape(shape=(-3,1)) \
+                         if self.config.conditional_decoder == C.CD_OUTPUT_BIAS else None
+
+            # output layer
+            # logits: (batch_size * target_seq_len, target_vocab_size)
+            logits = self.output_layer(target_decoded, tiled_tags)
+
+            loss_output = self.model_loss.get_loss(logits, labels)
+
+            return mx.sym.Group(loss_output), data_names, label_names
+
+        def sym_gen_consistency(seq_lens):
+            """
+            Returns a (grouped) loss symbol given source & target input lengths.
+            Also returns data and label names for the BucketingModule.
+            """
+            source_seq_len, target_seq_len = seq_lens
+            reference_seq_len = target_seq_len
+
+            # source embedding
+            # source_embed: <2U> FU1 FU2 ... FUn <EOS>
+            #               <2I> EF1 EF2 ... EFn <EOS>
+            #               <2F> EI1 EI2 ... EIn <EOS>
+            (source_embed,
+             source_embed_length,
+             source_embed_seq_len) = self.embedding_source.encode(source, source_length, source_seq_len)
+
+            # target embedding
+            # target_embed: <BOS> <2U> EU1 EU2 ... EUn
+            #               <BOS> <2F> EI1 EI2 ... EIn
+            #               <BOS> <2I> EF1 EF2 ... EFn
+            (target_embed,
+             target_embed_length,
+             target_embed_seq_len) = self.embedding_target.encode(target, target_length, target_seq_len)
+
+            # source_tag: (batch_size, 1)
+            source_tag = source_words.slice_axis(axis=1, begin=0, end=1)
+            source_style = (mx.sym.random.uniform_like(source_tag) < 0.5) + C.FORMAL_ID
+            # tounk_mask: (batch_size, 1)
+            tounk_mask = source_tag == C.TOUNK_ID
+            # consistency_source: (batch_size, seq_length)
+            consistency_ref = mx.sym.concat(source_style, reference.slice_axis(axis=1, begin=1, end=None), dim=1)
+            consistency_src = mx.sym.concat(source_style, source_words.slice_axis(axis=1, begin=1, end=None), dim=1)
+
+            # consistency_ref embedding
+            # consistency_ref_embed: <2F> EU1 EU2 ... EUn <EOS>
+            #                        <2I> EU1 EU2 ... EUn <EOS>
+            (consistency_ref_embed,
+             consistency_ref_embed_length,
+             consistency_ref_embed_seq_len) = self.embedding_target.encode(consistency_ref, reference_length, reference_seq_len)
+
+            # consistency_src embedding
+            # consistency_src_embed: <2F> FU1 FU2 ... FUn <EOS>
+            #                        <2I> FU1 FU2 ... FUn <EOS>
+            (consistency_src_embed,
+             consistency_src_embed_length,
+             consistency_src_embed_seq_len) = self.embedding_target.encode(consistency_src, source_length, source_seq_len)
+
+            # source encoder
+            # source_encoded: (batch_size, max_seq_len, encoder_depth)
+            (source_encoded,
+             source_encoded_length,
+             source_encoded_seq_len) = self.encoder.encode(source_embed,
+                                                           source_embed_length,
+                                                           source_embed_seq_len)
+
+            # consistency_ref encoder
+            # consistency_ref_encoded: (batch_size, max_seq_len, encoder_depth)
+            (consistency_ref_encoded,
+             consistency_ref_encoded_length,
+             consistency_ref_encoded_seq_len) = self.encoder.encode(consistency_ref_embed,
+                                                                    consistency_ref_embed_length,
+                                                                    consistency_ref_embed_seq_len)
+
+            # consistency_src encoder
+            # consistency_src_encoded: (batch_size, max_seq_len, encoder_depth)
+            (consistency_src_encoded,
+             consistency_src_encoded_length,
+             consistency_src_encoded_seq_len) = self.encoder.encode(consistency_src_embed,
+                                                                    consistency_src_embed_length,
+                                                                    consistency_src_embed_seq_len)
+
+            # source decoder (teacher forcing)
+            self.decoder.teacher_forcing = True
+            self.decoder.decode_type = [C.DECODE_TYPE_HIDDEN]
+            # target_decoded: (batch_size, max_seq_len, decoder_depth)
+            # target_decoded: <2U> EU1 EU2 ... EUn <EOS>
+            #                 <2F> EI1 EI2 ... EIn <EOS>
+            #                 <2I> EF1 EF2 ... EFn <EOS>
+            (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded,
+                                                                  source_encoded_length,
+                                                                  source_encoded_seq_len,
+                                                                  target_embed,
+                                                                  target_embed_length,
+                                                                  target_embed_seq_len,
+                                                                  tags=None)
+
+            # consistency_ref decoder (no teacher forcing)
+            self.decoder.teacher_forcing = False
+            self.decoder.decode_type = [C.DECODE_TYPE_EMBED, C.DECODE_TYPE_WORD]
+            # consistency_ref_decoded[embed]: (batch_size, max_seq_len, num_target_embed)
+            # consistency_ref_decoded[word]:  (batch_size, max_seq_len, 1)
+            # consistency_ref_decoded: <2I> EF1 EF2 ... EFn <EOS>
+            #                          <2F> EI1 EI2 ... EIn <EOS>
+            (consistency_ref_decoded,
+             consistency_ref_decoded_length,
+             consistency_ref_decoded_seq_len) = self.decoder.decode_sequence(consistency_ref_encoded,
+                                                                             consistency_ref_encoded_length,
+                                                                             consistency_ref_encoded_seq_len,
+                                                                             target_embed,
+                                                                             target_embed_length,
+                                                                             target_embed_seq_len,
+                                                                             tags=None)
+            # consistency_ref_embed_bos_1: <BOS>
+            consistency_ref_embed_bos_1 = target_embed.slice_axis(axis=1, begin=0, end=1)
+            # consistency_ref_embed_bos_2: <2I> EF1 EF2 ... EFn <EOS>
+            #                              <2F> EI1 EI2 ... EIn <EOS>
+            consistency_ref_embed_bos_2 = consistency_ref_decoded[C.DECODE_TYPE_EMBED].slice_axis(axis=1, begin=0, end=-1)
+            # consistency_ref_embed_bos:   <BOS> <2I> EF1 EF2 ... EFn <EOS>
+            #                              <BOS> <2F> EI1 EI2 ... EIn <EOS>
+            consistency_ref_embed_bos = mx.sym.concat(consistency_ref_embed_bos_1, consistency_ref_embed_bos_2, dim=1)
+            consistency_ref_embed_bos = mx.sym.BlockGrad(consistency_ref_embed_bos)
+
+            # consistency_src decoder (teacher forcing)
+            self.decoder.teacher_forcing = True
+            self.decoder.decode_type = [C.DECODE_TYPE_HIDDEN]
+            # consistency_src_decoded: (batch_size, max_seq_len, decoder_depth)
+            # consistency_src_decoded: <2I> EF1 EF2 ... EFn <EOS>
+            #                          <2F> EI1 EI2 ... EIn <EOS>
+            (consistency_src_decoded, _, _) = self.decoder.decode_sequence(consistency_src_encoded,
+                                                                           consistency_src_encoded_length,
+                                                                           consistency_src_encoded_seq_len,
+                                                                           consistency_ref_embed_bos,
+                                                                           consistency_ref_decoded_length,
+                                                                           consistency_ref_decoded_seq_len,
+                                                                           tags=None)
+
+            # target_decoded: (batch_size * max_seq_len, decoder_depth)
+            target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
+
+            # supervision output layer
+            # logits: (batch_size * max_seq_len, target_vocab_size)
+            logits = self.output_layer(target_decoded)
+
+            supervision_loss_output = self.model_loss.get_loss(logits,
+                                                               labels,
+                                                               grad_scale=1.0-self.sampling_loss_weight_total)
+
+            # target_decoded: (batch_size * max_seq_len, decoder_depth)
+            consistency_src_decoded = mx.sym.reshape(data=consistency_src_decoded, shape=(-3, 0))
+
+            # consistency output layer
+            # consistency_src_logits: (batch_size * max_seq_len, target_vocab_size)
+            consistency_src_logits = self.output_layer(consistency_src_decoded)
+            # consistency_ref_label: (batch_size * max_seq_len,)
+            consistency_ref_label = consistency_ref_decoded[C.DECODE_TYPE_WORD].squeeze()
+            consistency_ref_label = mx.sym.broadcast_mul(consistency_ref_label, tounk_mask).reshape(shape=(-1,))
+            consistency_ref_label = mx.sym.BlockGrad(consistency_ref_label)
+
+            consistency_loss_output = self.model_loss.get_loss(consistency_src_logits,
+                                                               labels=consistency_ref_label,
+                                                               grad_scale=self.objective_weight[C.CONSISTENCY],
+                                                               prefix=C.CONSISTENCY_PREFIX)
+
+            loss_output = supervision_loss_output + consistency_loss_output
+
+            return mx.sym.Group(loss_output), data_names, label_names
+
+        def sym_gen_adaptive(seq_lens):
+            """
+            Returns a (grouped) loss symbol given source & target input lengths.
+            Also returns data and label names for the BucketingModule.
+            """
+            source_seq_len, target_seq_len = seq_lens
+
+            # x_tag: (batch_size, 1)
+            source_tag = source_words.slice_axis(axis=1, begin=0, end=1)
+            target_tag = target.slice_axis(axis=1, begin=1, end=2)
+            # tag_2x: (batch_size, 1)
+            tag_2i = mx.sym.zeros_like(source_tag) + C.INFORMAL_ID
+            tag_2f = mx.sym.zeros_like(source_tag) + C.FORMAL_ID
+
+            # source_2x_words: (batch_size, seq_length)
+            source_2i_words = mx.sym.concat(tag_2i, source_words.slice_axis(axis=1, begin=1, end=None), dim=1)
+            source_2f_words = mx.sym.concat(tag_2f, source_words.slice_axis(axis=1, begin=1, end=None), dim=1)
+
+            # source_2x embedding
+            # source_2i_embed: <2I> FU1 FU2 ... FUn <EOS>
+            #                  <2I> EF1 EF2 ... EFn <EOS>
+            #                  <2I> EI1 EI2 ... EIn <EOS>
+            (source_2i_embed,
+             source_2i_embed_length,
+             source_2i_embed_seq_len) = self.embedding_target.encode(source_2i_words, source_length, source_seq_len)
+            # source_2f_embed: <2F> FU1 FU2 ... FUn <EOS>
+            #                  <2F> EF1 EF2 ... EFn <EOS>
+            #                  <2F> EI1 EI2 ... EIn <EOS>
+            (source_2f_embed,
+             source_2f_embed_length,
+             source_2f_embed_seq_len) = self.embedding_target.encode(source_2f_words, source_length, source_seq_len)
+
+            # target_2x: (batch_size, seq_length)
+            target_2i = mx.sym.concat(target.slice_axis(axis=1, begin=0, end=1), tag_2i,
+                                      target.slice_axis(axis=1, begin=2, end=None), dim=1)
+            target_2f = mx.sym.concat(target.slice_axis(axis=1, begin=0, end=1), tag_2f,
+                                      target.slice_axis(axis=1, begin=2, end=None), dim=1)
+
+            # target_2x embedding
+            # target_2i_embed: <BOS> <2I> EU1 EU2 ... EUn
+            #                  <BOS> <2I> EI1 EI2 ... EIn
+            #                  <BOS> <2I> EF1 EF2 ... EFn
+            (target_2i_embed,
+             target_2i_embed_length,
+             target_2i_embed_seq_len) = self.embedding_target.encode(target_2i, target_length, target_seq_len)
+            # target_2f_embed: <BOS> <2F> EU1 EU2 ... EUn
+            #                  <BOS> <2F> EI1 EI2 ... EIn
+            #                  <BOS> <2F> EF1 EF2 ... EFn
+            (target_2f_embed,
+             target_2f_embed_length,
+             target_2f_embed_seq_len) = self.embedding_target.encode(target_2f, target_length, target_seq_len)
+
+            # encoder
+            # source_2x_encoded: (batch_size, source_encoded_length, encoder_depth)
+            (source_2i_encoded,
+             source_2i_encoded_length,
+             source_2i_encoded_seq_len) = self.encoder.encode(source_2i_embed,
+                                                              source_2i_embed_length,
+                                                              source_2i_embed_seq_len)
+            (source_2f_encoded,
+             source_2f_encoded_length,
+             source_2f_encoded_seq_len) = self.encoder.encode(source_2f_embed,
+                                                              source_2f_embed_length,
+                                                              source_2f_embed_seq_len)
+
+            # decoder
+            # target_2x_decoded: (batch_size, target_len, decoder_depth)
+            (target_2f_decoded, _, _) = self.decoder.decode_sequence(source_2i_encoded,
+                                                                     source_2i_encoded_length,
+                                                                     source_2i_encoded_seq_len,
+                                                                     target_2f_embed,
+                                                                     target_2f_embed_length,
+                                                                     target_2f_embed_seq_len,
+                                                                     tags=None)
+            (target_2i_decoded, _, _) = self.decoder.decode_sequence(source_2f_encoded,
+                                                                     source_2f_encoded_length,
+                                                                     source_2f_encoded_seq_len,
+                                                                     target_2i_embed,
+                                                                     target_2i_embed_length,
+                                                                     target_2i_embed_seq_len,
+                                                                     tags=None)
+
+            # target_2x_decoded: (batch_size * target_seq_len, decoder_depth)
+            target_2f_decoded = mx.sym.reshape(data=target_2f_decoded, shape=(-3, 0))
+            target_2i_decoded = mx.sym.reshape(data=target_2i_decoded, shape=(-3, 0))
+
+            # output layer
+            # logits_2x: (batch_size * target_seq_len, target_vocab_size)
+            logits_2f = self.output_layer(target_2f_decoded)
+            logits_2i = self.output_layer(target_2i_decoded)
+            # logits_2x: (batch_size, target_seq_len, target_vocab_size)
+            logits_2f = mx.sym.reshape(data=logits_2f, shape=(-4, -1, target_seq_len, -2))
+            logits_2i = mx.sym.reshape(data=logits_2i, shape=(-4, -1, target_seq_len, -2))
+
+            # reference_valid: (batch_size, target_seq_len)
+            reference_valid = reference >= len(C.VOCAB_SYMBOLS) # non-reserved tokens
+            reference_valid_short = mx.sym.concat(mx.sym.zeros_like(source_tag),
+                                                  mx.sym.zeros_like(source_tag),
+                                                  reference_valid.slice_axis(axis=1, begin=2, end=None), dim=1)
+            # reference_valid_short excludes the first token which may dominate the style
+
+            # nls_delta: (batch_size, target_seq_len)
+            _, _, nls_delta = utils.cross_entropy_delta(logits_2f, logits_2i, reference, labels_valid=reference_valid)
+
+            # reference_valid_count: (batch_size, 1)
+            reference_valid_count = mx.sym.sum(reference_valid, axis=1, keepdims=True)
+            reference_valid_short_count = reference_valid_count - 1
+            # nls_delta_x: (batch_size, 1)
+            nls_delta_pos_ratio = mx.sym.broadcast_div(mx.sym.sum(nls_delta > 0, axis=1, keepdims=True), reference_valid_count)
+            nls_delta_neg_ratio = mx.sym.broadcast_div(mx.sym.sum(nls_delta < 0, axis=1, keepdims=True), reference_valid_count)
+            nls_delta_short = mx.sym.broadcast_mul(nls_delta, reference_valid_short)
+            nls_delta_mean = mx.sym.broadcast_div(mx.sym.sum(nls_delta_short, axis=1, keepdims=True),
+                                                  reference_valid_short_count)
+            nls_delta_min = mx.sym.min(nls_delta, axis=1, keepdims=True)
+
+            nls_delta_abs_sum = mx.sym.sum(mx.sym.abs(nls_delta))
+            reference_valid_total = mx.sym.sum(reference_valid_count)
+            nls_delta_abs_mean = mx.sym.broadcast_like((nls_delta_abs_sum/reference_valid_total).expand_dims(axis=1),
+                                                       nls_delta_min)
+#            nls_delta_mean_std = utils.std(nls_delta_mean, axis=0)
+
+            # src_is_2i: (batch_size, 1)
+            src_is_2i = nls_delta_mean < 0
+            # x_adaptive_tag: (batch_size, 1)
+            source_adaptive_tag = src_is_2i + C.FORMAL_ID   # 5 = True + 4
+            target_adaptive_tag = C.INFORMAL_ID - src_is_2i # 4 = 5 - True
+
+            # change_tag*: (batch_size, 1)
+#            change_tag_2i = nls_delta_mean < -nls_delta_mean_std
+#            change_tag_2i = mx.sym.broadcast_logical_and(change_tag_2i, nls_delta_neg_ratio > 0.33)
+#            change_tag_2f = nls_delta_mean > nls_delta_mean_std
+#            change_tag_2f = mx.sym.broadcast_logical_and(change_tag_2f, nls_delta_pos_ratio > 0.7)
+            change_tag_2i = nls_delta_mean < -nls_delta_abs_mean
+            change_tag_2i = mx.sym.broadcast_logical_and(change_tag_2i, nls_delta_neg_ratio > 0.6)
+            change_tag_2f = nls_delta_mean > nls_delta_abs_mean
+            change_tag_2f = mx.sym.broadcast_logical_and(change_tag_2f, nls_delta_min > -nls_delta_abs_mean)
+            change_tag_2f = mx.sym.broadcast_logical_and(change_tag_2f, nls_delta_pos_ratio > 0.8)
+            # additional "broadcast_logical_and" filters are used to make balanced positive-negative tags
+            change_tag = mx.sym.broadcast_logical_or(change_tag_2i, change_tag_2f)
+            change_tag = mx.sym.broadcast_logical_and(change_tag, source_tag == C.TOUNK_ID)
+            # x_adaptive_tag: (batch_size, 1)
+            source_adaptive_tag = mx.sym.where(change_tag, source_adaptive_tag, source_tag)
+            target_adaptive_tag = mx.sym.where(change_tag, target_adaptive_tag, target_tag)
+
+            # source_adaptive_words: (batch_size, seq_length)
+            source_adaptive_words = mx.sym.concat(source_adaptive_tag,
+                                                  source_words.slice_axis(axis=1, begin=1, end=None), dim=1)
+            # target_adaptive: (batch_size, seq_length)
+            target_adaptive = mx.sym.concat(target.slice_axis(axis=1, begin=0, end=1), target_adaptive_tag,
+                                            target.slice_axis(axis=1, begin=2, end=None), dim=1)
+            # reference_adaptive: (batch_size, seq_length)
+            reference_adaptive = mx.sym.concat(target_adaptive_tag,
+                                               reference.slice_axis(axis=1, begin=1, end=None), dim=1)
+            # labels_adaptive: (batch_size*seq_length)
+            labels_adaptive = mx.sym.reshape(data=reference_adaptive, shape=(-1,))
+
+            source_adaptive_words = mx.sym.BlockGrad(source_adaptive_words)
+            target_adaptive = mx.sym.BlockGrad(target_adaptive)
+            labels_adaptive = mx.sym.BlockGrad(labels_adaptive)
+
+            # source embedding
+            (source_embed,
+             source_embed_length,
+             source_embed_seq_len) = self.embedding_target.encode(source_adaptive_words, source_length, source_seq_len)
+
+            # target embedding
+            (target_embed,
+             target_embed_length,
+             target_embed_seq_len) = self.embedding_target.encode(target_adaptive, target_length, target_seq_len)
+
+            # encoder
+            # source_encoded: (batch_size, source_encoded_length, encoder_depth)
+            (source_encoded,
+             source_encoded_length,
+             source_encoded_seq_len) = self.encoder.encode(source_embed,
+                                                           source_embed_length,
+                                                           source_embed_seq_len)
+
+            # decoder
+            # target_decoded: (batch_size, target_len, decoder_depth)
+            (target_decoded, _, _) = self.decoder.decode_sequence(source_encoded,
+                                                                  source_encoded_length,
+                                                                  source_encoded_seq_len,
+                                                                  target_embed,
+                                                                  target_embed_length,
+                                                                  target_embed_seq_len,
+                                                                  tags=None)
 
             # target_decoded: (batch_size * target_seq_len, decoder_depth)
             target_decoded = mx.sym.reshape(data=target_decoded, shape=(-3, 0))
@@ -142,9 +544,16 @@ class TrainingModel(model.SockeyeModel):
             # logits: (batch_size * target_seq_len, target_vocab_size)
             logits = self.output_layer(target_decoded)
 
-            loss_output = self.model_loss.get_loss(logits, labels)
+            loss_output = self.model_loss.get_loss(logits, labels_adaptive)
 
             return mx.sym.Group(loss_output), data_names, label_names
+
+        if C.CONSISTENCY in self.sampling_objectives:
+            sym_gen = sym_gen_consistency
+        elif self.adaptive_tagging:
+            sym_gen = sym_gen_adaptive
+        else:
+            sym_gen = sym_gen_standard
 
         if self.config.lhuc:
             arguments = sym_gen(default_bucket_key)[0].list_arguments()
@@ -363,6 +772,15 @@ class TrainingModel(model.SockeyeModel):
     @property
     def monitor(self) -> Optional[mx.monitor.Monitor]:
         return self._monitor
+
+    def metric_output_names(self, is_train: bool = True) -> List[str]:
+        """
+        Returns the names of model outputs for metrics
+        """
+        if C.CONSISTENCY in self.sampling_objectives and is_train:
+            return [C.CONSISTENCY_SOFTMAX_OUTPUT_NAME]
+        else:
+            return [C.SOFTMAX_OUTPUT_NAME]
 
 
 def global_norm(ndarrays: List[mx.nd.NDArray]) -> float:
@@ -870,38 +1288,39 @@ class EarlyStoppingTrainer:
         return os.path.join(self.model.output_dir, C.TRAINING_STATE_DIRNAME)
 
     @staticmethod
-    def _create_eval_metric(metric_name: str) -> mx.metric.EvalMetric:
+    def _create_eval_metric(metric_name: str, output_names: List[str]) -> mx.metric.EvalMetric:
         """
         Creates an EvalMetric given a metric names.
         """
         # output_names refers to the list of outputs this metric should use to update itself, e.g. the softmax output
         if metric_name == C.ACCURACY:
-            return utils.Accuracy(ignore_label=C.PAD_ID, output_names=[C.SOFTMAX_OUTPUT_NAME])
+            return utils.Accuracy(ignore_label=C.PAD_ID, output_names=output_names)
         elif metric_name == C.PERPLEXITY:
-            return mx.metric.Perplexity(ignore_label=C.PAD_ID, output_names=[C.SOFTMAX_OUTPUT_NAME])
+            return mx.metric.Perplexity(ignore_label=C.PAD_ID, output_names=output_names)
         else:
             raise ValueError("unknown metric name")
 
     @staticmethod
-    def _create_eval_metric_composite(metric_names: List[str]) -> mx.metric.CompositeEvalMetric:
+    def _create_eval_metric_composite(metric_names: List[str],
+                                      output_names: List[str]) -> mx.metric.CompositeEvalMetric:
         """
         Creates a composite EvalMetric given a list of metric names.
         """
-        metrics = [EarlyStoppingTrainer._create_eval_metric(metric_name) for metric_name in metric_names]
+        metrics = [EarlyStoppingTrainer._create_eval_metric(metric_name, output_names) for metric_name in metric_names]
         return mx.metric.create(metrics)
 
     def _create_metrics(self, metrics: List[str], optimizer: mx.optimizer.Optimizer,
                         loss: loss.Loss) -> Tuple[mx.metric.EvalMetric,
                                                   mx.metric.EvalMetric,
                                                   Optional[mx.metric.EvalMetric]]:
-        metric_train = self._create_eval_metric_composite(metrics)
-        metric_val = self._create_eval_metric_composite(metrics)
+        metric_train = self._create_eval_metric_composite(metrics, self.model.metric_output_names(is_train=True))
+        metric_val = self._create_eval_metric_composite(metrics, self.model.metric_output_names(is_train=False))
         # If optimizer requires it, track loss as metric
         if isinstance(optimizer, SockeyeOptimizer):
             if optimizer.request_optimized_metric:
                 metric_loss = self._create_eval_metric(self.state.early_stopping_metric)
             else:
-                metric_loss = loss.create_metric()
+                metric_loss = loss.create_metric(self.model.metric_output_names(is_train=True))
         else:
             metric_loss = None
         return metric_train, metric_val, metric_loss

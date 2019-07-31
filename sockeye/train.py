@@ -542,6 +542,12 @@ def create_decoder_config(args: argparse.Namespace, encoder_num_hidden: int,
         _, decoder_rnn_dropout_states = args.rnn_dropout_states
         _, decoder_rnn_dropout_recurrent = args.rnn_dropout_recurrent
 
+        if args.conditional_decoder == C.CD_PREV_EMBED_CONCAT:
+            style_num_embed = args.style_num_embed
+        elif args.conditional_decoder == C.CD_TAG_ATTENTION:
+            style_num_embed = encoder_num_hidden
+        else:
+            style_num_embed = num_embed_target
         config_decoder = decoder.RecurrentDecoderConfig(
             max_seq_len_source=max_seq_len_source,
             rnn_config=rnn.RNNConfig(cell_type=args.rnn_cell_type,
@@ -555,6 +561,7 @@ def create_decoder_config(args: argparse.Namespace, encoder_num_hidden: int,
                                      forget_bias=args.rnn_forget_bias,
                                      lhuc=args.lhuc is not None and (C.LHUC_DECODER in args.lhuc or C.LHUC_ALL in args.lhuc)),
             attention_config=config_attention,
+            conditional_decoder=(args.conditional_decoder, style_num_embed),
             hidden_dropout=args.rnn_decoder_hidden_dropout,
             state_init=args.rnn_decoder_state_init,
             context_gating=args.rnn_context_gating,
@@ -647,6 +654,8 @@ def create_model_config(args: argparse.Namespace,
                                                   num_embed=num_embed_source,
                                                   dropout=embed_dropout_source,
                                                   factor_configs=source_factor_configs,
+                                                  reserve_last_factor=args.conditional_decoder is not None and
+                                                                      not args.keep_factors,
                                                   source_factors_combine=args.source_factors_combine)
 
     config_embed_target = encoder.EmbeddingConfig(vocab_size=target_vocab_size,
@@ -669,6 +678,9 @@ def create_model_config(args: argparse.Namespace,
                                      weight_tying=args.weight_tying,
                                      weight_tying_type=args.weight_tying_type if args.weight_tying else None,
                                      weight_normalization=args.weight_normalization,
+                                     softmax_temperature=args.softmax_temperature,
+                                     gumbel_noise_scale=args.gumbel_noise_scale,
+                                     conditional_decoder=args.conditional_decoder,
                                      lhuc=args.lhuc is not None)
     return model_config
 
@@ -696,7 +708,11 @@ def create_training_model(config: model.ModelConfig,
                                             default_bucket_key=train_iter.default_bucket_key,
                                             bucketing=not args.no_bucketing,
                                             gradient_compression_params=gradient_compression_params(args),
-                                            fixed_param_names=args.fixed_param_names)
+                                            fixed_param_names=args.fixed_param_names,
+                                            sampling_objectives=args.sampling_objectives,
+                                            sampling_loss_weights=args.sampling_loss_weights,
+                                            adaptive_tagging=args.adaptive_tagging,
+                                            instantiate_hidden=args.instantiate_hidden)
 
     return training_model
 

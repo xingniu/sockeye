@@ -338,6 +338,7 @@ class EmbeddingConfig(config.Config):
                  num_embed: int,
                  dropout: float,
                  factor_configs: Optional[List[FactorConfig]] = None,
+                 reserve_last_factor: bool = False,
                  source_factors_combine: str = C.SOURCE_FACTORS_COMBINE_CONCAT,
                  dtype: str = C.DTYPE_FP32) -> None:
         super().__init__()
@@ -345,6 +346,7 @@ class EmbeddingConfig(config.Config):
         self.num_embed = num_embed
         self.dropout = dropout
         self.factor_configs = factor_configs
+        self.reserve_last_factor = reserve_last_factor
         self.num_factors = 1
         if self.factor_configs is not None:
             self.num_factors += len(self.factor_configs)
@@ -402,6 +404,8 @@ class Embedding(Encoder):
                                                num_outputs=self.config.num_factors,
                                                axis=2,
                                                squeeze_axis=True, name=self.prefix + "factor_split")
+            if self.config.reserve_last_factor:
+                data_factors = data_factors[:-1]
 
             if self.config.factor_configs is not None:
                 for i, (factor_data, factor_config, factor_weight) in enumerate(zip(data_factors,

@@ -790,6 +790,35 @@ def add_model_parameters(params):
                               help="Adds weight normalization to decoder output layers "
                                    "(and all convolutional weight matrices for CNN decoders). Default: %(default)s.")
 
+    model_params.add_argument('--conditional-decoder',
+                              default=None,
+                              choices=C.CD_CHOICES,
+                              help='Type of the conditional decoder. Default: %(default)s.')
+    model_params.add_argument('--style-num-embed',
+                              type=int,
+                              default=0,
+                              help='Embedding size for the style. Default: %(default)s.')
+    model_params.add_argument('--keep-factors',
+                              action='store_true',
+                              help='Keep all factors. %(default)s.')
+
+    # sampling in decoders
+    model_params.add_argument('--instantiate-hidden',
+                              type=str,
+                              default=None,
+                              choices=C.INSTANTIATING_HIDDEN_CHOICES,
+                              help='Use instantiated hidden states as previous target embeddings. '
+                                   'This is currently for RNN models only. Default: %(default)s.')
+    model_params.add_argument('--softmax-temperature',
+                              type=float,
+                              default=1.0,
+                              help='Controls peakiness of model predictions. Values < 1.0 produce '
+                                   'peaked predictions, values > 1.0 produce smoothed distributions.')
+    model_params.add_argument('--gumbel-noise-scale',
+                              type=float,
+                              default=1.0,
+                              help='Gumbel noise scale.')
+
 
 def add_batch_args(params, default_batch_size=4096):
     params.add_argument('--batch-size', '-b',
@@ -1105,6 +1134,21 @@ def add_training_args(params):
                               action='store_true',
                               help="Do not perform any actual training, but print statistics about the model"
                               " and mode of operation.")
+
+    train_params.add_argument('--sampling-objectives',
+                              type=str,
+                              nargs='+',
+                              default=[],
+                              choices=C.SAMPLING_OBJECTIVES,
+                              help='Sampling-based objectives. This is currently for RNN models only. Default: %(default)s.')
+    train_params.add_argument('--sampling-loss-weights',
+                              type=float,
+                              nargs='+',
+                              default=[0.5],
+                              help='The weights for sampling losses. Default: %(default)s.')
+    train_params.add_argument('--adaptive-tagging',
+                              action='store_true',
+                              help="Assign formality tags adaptively.")
 
 
 def add_train_cli_args(params):
