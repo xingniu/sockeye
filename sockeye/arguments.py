@@ -1371,6 +1371,10 @@ def add_inference_args(params):
                                action='store_true',
                                default=False,
                                help='Remove any <unk> symbols from outputs. Default: %(default)s.')
+    decode_params.add_argument('--nbest-word-list-size',
+                               type=int_greater_or_equal(1),
+                               default=5,
+                               help='Size of the n-best word list at each step for top translations. Default: %(default)s.')
 
     decode_params.add_argument('--output-type',
                                default='translation',

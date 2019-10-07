@@ -56,6 +56,8 @@ def get_output_handler(output_type: str,
         return BeamStoringHandler(output_stream)
     elif output_type == C.OUTPUT_HANDLER_JSON:
         return JSONOutputHandler(output_stream, sure_align_threshold)
+    elif output_type == C.OUTPUT_HANDLER_NBEST_WORDS:
+        return NBestWordsOutputHandler(output_stream)
     else:
         raise ValueError("unknown output type")
 
@@ -393,6 +395,7 @@ class BeamStoringHandler(OutputHandler):
     def reports_score(self) -> bool:
         return False
 
+
 class JSONOutputHandler(OutputHandler):
     """
     Output single-line JSON objects.
@@ -417,3 +420,35 @@ class JSONOutputHandler(OutputHandler):
 
     def reports_score(self) -> bool:
         return True
+
+
+class NBestWordsOutputHandler(OutputHandler):
+    """
+    Output handler to write n-best words at each step for top translations in JSON format.
+    :param stream: Stream to write translations to (e.g. sys.stdout).
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def handle(self,
+               t_input: inference.TranslatorInput,
+               t_output: inference.TranslatorOutput,
+               t_walltime: float = 0.):
+        """
+        :param t_input: Translator input.
+        :param t_output: Translator output.
+        :param t_walltime: Total wall-clock time for translation.
+        """
+        new_h = {"translation": t_output.translation}
+        new_h["id"] = t_output.sentence_id  # type: ignore
+        new_h["nbest_words"] = [] # type: ignore
+        if len(t_output.beam_histories) >= 1:
+            # If the sentence was max_len split, we may have more than one history
+            for h in t_output.beam_histories:
+                new_h["nbest_words"] += h["nbest_words"]
+        self.stream.write("%s\n" % json.dumps(new_h, sort_keys=True))
+        self.stream.flush()
+
+    def reports_score(self) -> bool:
+        return False

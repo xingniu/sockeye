@@ -110,7 +110,7 @@ def run_translate(args: argparse.Namespace):
                     lexicon.load(path, k=args.restrict_lexicon_topk)
                     restrict_lexicon[key] = lexicon
 
-        store_beam = args.output_type == C.OUTPUT_HANDLER_BEAM_STORE
+        store_beam = args.output_type == C.OUTPUT_HANDLER_BEAM_STORE or args.output_type == C.OUTPUT_HANDLER_NBEST_WORDS
 
         brevity_penalty_weight = args.brevity_penalty_weight
         if args.brevity_penalty_type == C.BREVITY_PENALTY_CONSTANT:
@@ -147,10 +147,12 @@ def run_translate(args: argparse.Namespace):
                                           avoid_list=args.avoid_list,
                                           store_beam=store_beam,
                                           strip_unknown_words=args.strip_unknown_words,
+                                          nbest_word_list_size=args.nbest_word_list_size,
                                           skip_topk=args.skip_topk,
                                           sample=args.sample,
                                           constant_length_ratio=constant_length_ratio,
                                           brevity_penalty=brevity_penalty)
+
         read_and_translate(translator=translator,
                            output_handler=output_handler,
                            chunk_size=args.chunk_size,

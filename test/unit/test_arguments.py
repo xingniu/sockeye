@@ -232,6 +232,7 @@ def test_training_arg(test_params, expected_params):
                       brevity_penalty_weight=1.0,
                       brevity_penalty_type='none',
                       strip_unknown_words=False,
+                      nbest_word_list_size=5,
                       override_dtype=None,
                       sample=None,
                       seed=None,
